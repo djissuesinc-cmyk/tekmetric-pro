@@ -37,6 +37,7 @@ You need to understand what you are doing before you run this.
 1. Get your Google Gemini API key ready.
 2. Install the script in your browser.
 3. Enter your credentials for auto-login and your API key.
+^-> This will require you have a Tekmetric user account, otherwise this app will not work at all.
 4. Start using the modified interface.
 
 Developed by Shawn Bradbury.
