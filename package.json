@@ -1,7 +1,72 @@
 {
-  "name": "tekmetric-pro",
+  "name": "tekmetric-pro-app",
+  "productName": "Tekmetric Pro",
+  "version": "2.3.1",
+  "author": "Shawn Bradbury",
+  "description": "Shop management interface",
+  "main": "main.js",
   "private": true,
   "scripts": {
-    "test": "node --test tests/shared.test.js"
+    "start": "electron .",
+    "test": "node --test tests/settings.test.js",
+    "dist": "electron-builder --win nsis portable --x64"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "dotenv": "^17.3.1",
+    "electron-updater": "^6.8.3",
+    "pdf-lib": "^1.17.1"
+  },
+  "devDependencies": {
+    "electron": "^35.7.5",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.craigsleaside.tekmetricpro",
+    "productName": "Tekmetric Pro",
+    "icon": "logo.png",
+    "asar": true,
+    "files": [
+      "main.js",
+      "preload.js",
+      "dialog-preload.js",
+      "lib/**/*",
+      "logo.png",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "icon": "logo.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Tekmetric Pro",
+      "artifactName": "Tekmetric-Pro-Setup-${version}.exe"
+    },
+    "portable": {
+      "artifactName": "Tekmetric-Pro-Portable-${version}.exe"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "djissuesinc-cmyk",
+      "repo": "tekmetric-pro"
+    }
   }
 }
