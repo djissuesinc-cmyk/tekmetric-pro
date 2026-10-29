@@ -13,7 +13,8 @@
     "start": "electron .",
     "test": "node --test",
     "logo": "python3 scripts/build_logo.py",
-    "dist": "electron-builder"
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win --x64"
   },
   "dependencies": {
     "@google/genai": "2.32.0",
@@ -29,6 +30,10 @@
     "appId": "com.craigsleaside.tekmetricpro",
     "productName": "Tekmetric Pro",
     "asar": true,
+    "compression": "maximum",
+    "electronLanguages": [
+      "en-US"
+    ],
     "files": [
       "src/**/*",
       "assets/**/*",
@@ -57,9 +62,41 @@
     },
     "win": {
       "target": [
-        "nsis"
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
-      "icon": "assets/icon.png"
+      "icon": "assets/icon.png",
+      "signExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Tekmetric Pro",
+      "uninstallDisplayName": "Tekmetric Pro",
+      "artifactName": "Tekmetric-Pro-Setup-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "Tekmetric-Pro-Portable-${version}-${arch}.${ext}"
     },
     "mac": {
       "target": [

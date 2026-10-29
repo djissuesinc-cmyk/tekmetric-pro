@@ -30,7 +30,13 @@ To build an installer later:
 npm run dist
 ```
 
-Update checks run in that installed build. A source checkout reports that updates are not checked yet, instead of throwing.
+Windows x64 (NSIS setup, portable exe, and a zip of the unpacked app), including a cross-build from Linux:
+
+```bash
+npm run dist:win
+```
+
+On Linux that cross-build needs Wine, including 32-bit Wine (`wine32`), because the NSIS stub is 32-bit. The installed app itself is 64-bit. The executables are unsigned. Update checks run in that installed build. A source checkout reports that updates are not checked yet, instead of throwing.
 
 ## Keys and sign-in
 
