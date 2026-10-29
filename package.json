@@ -1,0 +1,7 @@
+{
+  "name": "tekmetric-pro",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/shared.test.js"
+  }
+}

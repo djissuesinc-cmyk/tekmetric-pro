@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tekmetric Pro</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Tekmetric Pro</h1>
+      <p class="lead">These switches change how Tekmetric looks and types on this computer. They do not change Tekmetric's website for anyone else.</p>
+
+      <label class="switch"><input id="darkMode" type="checkbox" checked /> Dark mode for late hours</label>
+      <label class="switch"><input id="spellcheck" type="checkbox" checked /> Spell check in notes</label>
+      <label class="switch"><input id="autoCapitalize" type="checkbox" checked /> Capitalize sentences when I leave a note</label>
+      <label class="switch"><input id="crossOutDone" type="checkbox" checked /> Draw an X on arrived or finished appointments</label>
+
+      <h2>Sign-in</h2>
+      <p>Your email and password stay in this browser. They are typed only into the Tekmetric sign-in page. They are not sent to Google.</p>
+      <label for="email">Email</label>
+      <input id="email" type="email" autocomplete="username" />
+      <label for="password">Password</label>
+      <input id="password" type="password" autocomplete="current-password" />
+      <label class="switch"><input id="autoFillLogin" type="checkbox" /> Fill these in on the sign-in page</label>
+      <label class="switch"><input id="autoPressSignIn" type="checkbox" disabled /> Press Sign In one time</label>
+      <p class="hint">Leave “Press Sign In” off if your shop uses a text code, or if Tekmetric asks you to prove you are not a robot. A wrong password is only tried once each visit, so it will not lock the account by retrying.</p>
+
+      <h2>Writing help</h2>
+      <p>The Google key is used only when you click Writing help on a Tekmetric page.</p>
+      <label for="geminiApiKey">Google Gemini key</label>
+      <input id="geminiApiKey" type="password" autocomplete="off" />
+      <p class="hint">Leave a box blank to keep what is already saved. Get a key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Google AI Studio</a>.</p>
+
+      <div class="row">
+        <button id="save" type="button">Save</button>
+        <button id="forget" type="button" class="quiet">Forget my login</button>
+      </div>
+      <p id="message" role="status"></p>
+      <p class="version">Version <span id="version">1.0.0</span> · This copy does not download updates by itself.</p>
+    </main>
+    <script src="shared.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

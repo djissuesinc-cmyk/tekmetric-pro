@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Tekmetric Pro preview</title>
+    <style>
+      body { margin: 0; font-family: Roboto, sans-serif; background: #eceff1; }
+      .bg-v2-shade-0 { background: #fff; }
+      .text-v2-shade-900 { color: #232e32; }
+      main { padding: 24px 24px 120px; max-width: 720px; }
+      .card { padding: 16px; border-radius: 12px; margin-bottom: 16px; }
+      label { display: block; margin-bottom: 8px; }
+      textarea, input { width: 100%; box-sizing: border-box; margin-bottom: 8px; }
+      .rbc-event, .rbc-agenda-event-cell {
+        position: relative;
+        min-height: 48px;
+        margin: 8px 0;
+        padding: 8px;
+        background: #7d9bd4;
+        border-radius: 6px;
+      }
+      .event-icon { display: inline-flex; width: 16px; height: 16px; }
+    </style>
+  </head>
+  <body>
+    <main class="bg-v2-shade-0 text-v2-shade-900">
+      <h1>Shop preview</h1>
+      <form class="card" onsubmit="return false">
+        <label>Email <input name="email" type="text" /></label>
+        <label>Password <input name="password" type="password" /></label>
+        <button type="submit">Sign In</button>
+      </form>
+      <section class="card">
+        <h2>Calendar</h2>
+        <div class="rbc-event" id="arrived">
+          <div class="event-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"></path></svg>
+          </div>
+          Brake inspection
+        </div>
+        <div class="rbc-event" id="open">Oil change</div>
+        <div class="rbc-agenda-event-cell" id="agenda"><ul>Arrived</ul> Waiting customer</div>
+      </section>
+      <section class="card">
+        <label for="note">Job note</label>
+        <textarea id="note">brake pads worn. customer waits.</textarea>
+      </section>
+    </main>
+    <script>
+      var stored = {
+        darkMode: true,
+        spellcheck: true,
+        autoCapitalize: true,
+        crossOutDone: true,
+        autoFillLogin: true,
+        autoPressSignIn: false,
+        email: 'tech@example.com',
+        password: 'preview-only',
+        geminiApiKey: 'preview-key'
+      };
+      globalThis.__TMPRO_PREVIEW__ = true;
+      globalThis.__TMPRO_PREVIEW_PATH__ = '/';
+      globalThis.chrome = {
+        storage: {
+          local: {
+            get: function (_keys, callback) { callback(stored); },
+            set: function (values, callback) {
+              Object.keys(values).forEach(function (key) { stored[key] = values[key]; });
+              if (callback) callback();
+            }
+          },
+          onChanged: { addListener: function () {} }
+        },
+        runtime: {
+          lastError: null,
+          getURL: function () { return '../extension/page.css'; },
+          sendMessage: function (payload, callback) {
+            callback({
+              ok: true,
+              text: 'Brake pads are worn and the customer is waiting. Confirm pad thickness before replacing them.'
+            });
+          },
+          getManifest: function () { return { version: '1.0.0' }; }
+        }
+      };
+    </script>
+    <script src="../extension/shared.js"></script>
+    <script src="../extension/content.js"></script>
+  </body>
+</html>
