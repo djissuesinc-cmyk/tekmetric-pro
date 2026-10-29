@@ -1,0 +1,109 @@
+{
+  "name": "tekmetric-pro",
+  "version": "1.0.0",
+  "description": "Local shop companion for Craig's Leaside Automotive. Unofficial and not affiliated with Tekmetric.",
+  "main": "src/main/main.js",
+  "author": "Shawn Bradbury",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test",
+    "logo": "python3 scripts/build_logo.py",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win --x64"
+  },
+  "dependencies": {
+    "@google/genai": "2.32.0",
+    "dotenv": "18.0.9",
+    "electron-updater": "6.8.11",
+    "pdf-lib": "1.17.1"
+  },
+  "devDependencies": {
+    "electron": "45.1.0",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "com.craigsleaside.tekmetricpro",
+    "productName": "Tekmetric Pro",
+    "asar": true,
+    "compression": "maximum",
+    "electronLanguages": [
+      "en-US"
+    ],
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json",
+      "!**/.env",
+      "!**/.env.*",
+      "!**/*.map"
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "djissuesinc-cmyk",
+        "repo": "tekmetric-pro"
+      }
+    ],
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Office",
+      "icon": "assets/icon.png"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.png",
+      "signExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Tekmetric Pro",
+      "uninstallDisplayName": "Tekmetric Pro",
+      "artifactName": "Tekmetric-Pro-Setup-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "Tekmetric-Pro-Portable-${version}-${arch}.${ext}"
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "icon": "assets/icon.png",
+      "category": "public.app-category.business"
+    }
+  }
+}
