@@ -1,0 +1,65 @@
+{
+  "name": "tekmetric-pro-app",
+  "version": "2.3.5",
+  "author": "Shawn Bradbury",
+  "description": "Shop management interface",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis portable --x64 --publish never",
+    "release": "electron-builder --win nsis --x64 --publish always"
+  },
+  "build": {
+    "appId": "com.craigsleaside.tekmetricpro",
+    "productName": "Tekmetric Pro",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "djissuesinc-cmyk",
+        "repo": "tekmetric-pro",
+        "releaseType": "release"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "shortcutName": "Tekmetric Pro",
+      "artifactName": "Tekmetric-Pro-Setup-${version}.${ext}"
+    },
+    "files": [
+      "**/*",
+      "!.env",
+      "!data/*",
+      "!test/**",
+      "!*.log",
+      "!logins.json",
+      "!users.json",
+      "!out*/**",
+      "!dist/**"
+    ],
+    "directories": {
+      "buildResources": "build"
+    },
+    "portable": {
+      "artifactName": "Tekmetric-Pro-Portable-${version}.${ext}"
+    }
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "dotenv": "^17.3.1",
+    "electron-updater": "^6.8.3",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "3.11.174"
+  },
+  "devDependencies": {
+    "electron": "^40.6.0",
+    "electron-builder": "^26.8.1"
+  }
+}

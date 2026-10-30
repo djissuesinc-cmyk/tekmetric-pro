@@ -1,0 +1,10 @@
+node_modules/
+dist/
+out*/
+.env
+.env.*
+*.log
+data/
+logins.json
+users.json
+!logins.example.json
