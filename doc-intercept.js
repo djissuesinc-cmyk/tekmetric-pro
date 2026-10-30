@@ -10,7 +10,7 @@ function kindFromUrl(u) {
     if (/\/work-?order\b/.test(p)) return 'workorder';
     if (/\/invoice\b/.test(p)) return 'invoice';
     if (/\/estimate\b/.test(p)) return 'estimate';
-    if (/\/inspection\b/.test(p)) return 'inspection';
+    if (/\/(inspections?|dvi)\b/.test(p)) return 'inspection';
     return null;
 }
 

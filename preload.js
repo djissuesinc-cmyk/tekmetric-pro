@@ -616,7 +616,7 @@ function getShopData() {
     } catch(e) {}
     
     const path = window.location.pathname.toLowerCase();
-    const docType = path.includes('/invoice') ? 'invoice' : path.includes('/repair') ? 'repair' : path.includes('/estimate') ? 'estimate' : 'other';
+    const docType = path.includes('/invoice') ? 'invoice' : path.includes('/repair') ? 'repair' : path.includes('/estimate') ? 'estimate' : path.includes('/inspection') ? 'inspection' : 'other';
     return { customer, vehicle, phone, docType };
 }
 

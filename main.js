@@ -5,7 +5,9 @@ const path = require('path');
 const fs = require('fs');
 const url = require('url');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
-const { stampPdf, findHeader } = require('./pdf-stamp');
+const { stampPdf, findHeader, detectKind } = require('./pdf-stamp');
+const { brandCss, brandHeader } = require('./brand');
+const { makeSessionFetch } = require('./nav-fetch');
 const { makeHttpsHandler } = require('./doc-intercept');
 const os = require('os');
 // Bulletproof startup marker: written synchronously on 'ready' to every candidate folder
@@ -293,6 +295,11 @@ function createWindow(targetUrl = 'https://shop.tekmetric.com/') {
         childWindow.maximize();
         attachNavControls(childWindow);
         watchChildForPdf(win, childWindow);
+        // v2.3.7: log what popups (e.g. Nexpart / PartsTech) actually load, to diagnose blank windows
+        const cwc = childWindow.webContents;
+        cwc.on('did-navigate', (e, u, code) => pdfLog('child navigated ' + code + ' ' + u));
+        cwc.on('did-fail-load', (e, code, desc, u, main) => { if (main) pdfLog('child load FAILED ' + code + ' ' + desc + ' ' + u); });
+        cwc.on('render-process-gone', (e, d) => pdfLog('child renderer gone: ' + (d && d.reason)));
     });
 
     return win;
@@ -621,7 +628,7 @@ async function applyPrintLayout(win, docType) {
     const s = loadSettings();
     const opts = {
         logoRight: docType === 'invoice' && !!s.invoiceLogoRight,
-        watermark: docType === 'invoice' && !!s.workOrderWatermark,
+        watermark: (docType === 'invoice' || docType === 'inspection') && !!s.workOrderWatermark,
         opacity: 0.045,
         logo: null
     };
@@ -760,7 +767,7 @@ async function processGeminiRequest(prompt, parentWin) {
 function requireAdmin(callback) {
     const parentWin = getMainWin();
     const authWin = new BrowserWindow({
-        width: 350, height: 240, 
+        width: 350, height: 320, 
         parent: parentWin || undefined, 
         modal: !!parentWin, 
         alwaysOnTop: true,
@@ -770,7 +777,8 @@ function requireAdmin(callback) {
     });
     
     const html = `
-        <body style="font-family: sans-serif; background: #121212; color: #fff; text-align: center; padding: 20px;">
+        ${brandCss()}<body style="font-family: sans-serif; background: #121212; color: #fff; text-align: center; padding: 20px;">
+            ${brandHeader(48)}
             <h3 style="margin-top: 0;">Admin Access</h3>
             <p style="font-size: 12px; color: #aaa;">Enter PIN to modify settings.</p>
             <input type="password" id="pin" autofocus style="padding: 8px; width: 60%; text-align: center; background: #222; color: white; border: 1px solid #555; border-radius: 4px;">
@@ -818,7 +826,7 @@ function requireAdmin(callback) {
 function openSettingsEditor() {
     const parentWin = getMainWin();
     const win = new BrowserWindow({ 
-        width: 600, height: 400, 
+        width: 600, height: 470, 
         parent: parentWin || undefined, 
         modal: !!parentWin, 
         alwaysOnTop: true,
@@ -829,8 +837,9 @@ function openSettingsEditor() {
     const safePath = jsLiteral(settingsPath);
     
     const html = `
-        <body style="font-family: sans-serif; padding: 20px; background: #121212; color: #e0e0e0;">
-            <h2>System Settings</h2>
+        ${brandCss()}<body style="font-family: sans-serif; padding: 20px; background: #121212; color: #e0e0e0;">
+            ${brandHeader(44)}
+            <h2 style="text-align:center;margin-top:0">System Settings</h2>
             <label>Gemini API Key:</label><br>
             <input type="password" id="api" value="${escapeHtml(s.apiKey || '')}" style="width: 100%; padding: 8px; margin-top: 5px; margin-bottom: 20px; background: #222; color: #fff; border: 1px solid #444;">
             <button id="save" style="padding: 10px 20px; background: #d32f2f; color: #fff; border: none; cursor: pointer;">Save Settings</button>
@@ -857,7 +866,7 @@ function openSettingsEditor() {
 function openUserEditor() {
     const parentWin = getMainWin();
     const win = new BrowserWindow({ 
-        width: 800, height: 600, 
+        width: 800, height: 680, 
         parent: parentWin || undefined, 
         modal: !!parentWin, 
         alwaysOnTop: true,
@@ -868,8 +877,9 @@ function openUserEditor() {
     const safePath = jsLiteral(usersPath);
     
     const html = `
-        <body style="font-family: sans-serif; padding: 20px; background: #121212; color: #e0e0e0;">
-            <h2>Shop User Profiles</h2>
+        ${brandCss()}<body style="font-family: sans-serif; padding: 20px; background: #121212; color: #e0e0e0;">
+            ${brandHeader(44)}
+            <h2 style="text-align:center;margin-top:0">Shop User Profiles</h2>
             <p>Edit the JSON data below. Keep the brackets and quotes intact.</p>
             <textarea id="users" style="width: 100%; height: 350px; padding: 10px; font-family: monospace; background: #222; color: #fff; border: 1px solid #444;">${escapeHtml(usersData)}</textarea>
             <br><br>
@@ -897,7 +907,7 @@ function openUserEditor() {
 function openPresetsEditor() {
     const parentWin = getMainWin();
     const win = new BrowserWindow({ 
-        width: 700, height: 600, 
+        width: 700, height: 680, 
         parent: parentWin || undefined, 
         modal: !!parentWin, 
         alwaysOnTop: true,
@@ -908,8 +918,9 @@ function openPresetsEditor() {
     const safePath = jsLiteral(settingsPath);
     
     const html = `
-        <body style="font-family: sans-serif; padding: 20px; background: #121212; color: #e0e0e0;">
-            <h2>Shop Text Presets</h2>
+        ${brandCss()}<body style="font-family: sans-serif; padding: 20px; background: #121212; color: #e0e0e0;">
+            ${brandHeader(44)}
+            <h2 style="text-align:center;margin-top:0">Shop Text Presets</h2>
             <p>Enter one preset job per line. Do not use quotes or commas to separate items.</p>
             <textarea id="presets" style="width: 100%; height: 350px; padding: 10px; font-family: monospace; background: #222; color: #fff; border: 1px solid #444; white-space: pre;"></textarea>
             <br><br>
@@ -945,7 +956,7 @@ function openAboutWindow() {
     });
 
     const htmlContent = `
-        <body style="font-family: 'Segoe UI', Tahoma, sans-serif; background-color: #0d0d0d; color: #e0e0e0; margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden;">
+        ${brandCss()}<body style="font-family: 'Segoe UI', Tahoma, sans-serif; background-color: #0d0d0d; color: #e0e0e0; margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden;">
             <div style="flex: 1; padding: 40px 30px; text-align: center;">
                 <img src="${logoDataUrl()}" style="width: 140px; margin-bottom: 16px; filter: drop-shadow(0 4px 12px rgba(211,47,47,0.35));">
                 <h1 style="margin: 0; font-size: 26px; color: #ffffff; letter-spacing: 1px;">Tekmetric Pro</h1>
@@ -966,7 +977,7 @@ function openAboutWindow() {
                 <strong style="color: #888;">LEGAL DISCLAIMER:</strong> This software operates as a standalone container alongside Tekmetric. It does not reflect the views or official software of Tekmetric. Unauthorized distribution or deployment outside of the authorized facility is prohibited.
             </div>
             <div style="background: #151515; padding-bottom: 25px; text-align: center;">
-                <button onclick="window.close()" style="background-color: #d32f2f; color: #ffffff; border: none; padding: 10px 30px; border-radius: 4px; font-weight: bold; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; font-size: 13px;">Acknowledged</button>
+                <button onclick="window.close()" style="background-color: #E30613; color: #ffffff; border: none; padding: 10px 30px; border-radius: 4px; font-weight: bold; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; font-size: 13px;">Acknowledged</button>
             </div>
         </body>
     `;
@@ -1053,37 +1064,11 @@ function setupMenu() {
     const template = [
         { label: 'Shop Admin', submenu: [
             { label: 'Login Selection', submenu: userMenu },
-            { label: 'Edit User Info', click: () => requireAdmin(openUserEditor) },
-            { label: 'Edit Text Presets', click: () => requireAdmin(openPresetsEditor) },
             { type: 'separator' },
-            { label: 'Purge System Cache', click: () => {
-                const tempDir = app.getPath('temp');
-                let count = 0;
-                try {
-                    const files = fs.readdirSync(tempDir);
-                    files.forEach(file => {
-                        if (file.startsWith('Leaside_RO_') && file.endsWith('.pdf')) {
-                            fs.unlinkSync(path.join(tempDir, file));
-                            count++;
-                        }
-                    });
-                    const win = getMainWin();
-                    const opt = { type: 'info', title: 'System Purge', message: `Purged ${count} temporary print files.` };
-                    if (win) dialog.showMessageBox(win, opt); else dialog.showMessageBox(opt);
-                } catch(e) {
-                    dialog.showErrorBox('Purge Error', e.message);
-                }
-            }},
+            { label: 'Edit User Info...', click: () => requireAdmin(openUserEditor) },
+            { label: 'Edit Text Presets...', click: () => requireAdmin(openPresetsEditor) },
+            { label: 'System Settings (API Keys)...', click: () => requireAdmin(openSettingsEditor) },
             { type: 'separator' },
-            { label: 'Check for Updates', click: () => {
-                if (!canAutoUpdate()) {
-                    dialog.showMessageBox({ type: 'info', title: 'Updates', message: 'Automatic updates work only in the installed version (Tekmetric-Pro-Setup). This portable/dev copy will not update itself.' }).catch(() => {});
-                    return;
-                }
-                manualUpdateCheck = true;
-                autoUpdater.checkForUpdates().catch(() => {});
-            }},
-            { label: 'About System', click: () => openAboutWindow() },
             { role: 'quit' }
         ]},
         { label: 'Quick Actions', submenu: [
@@ -1116,21 +1101,9 @@ function setupMenu() {
             // Alt+Left/Right is already handled per window (before-input-event), so only show the shortcut here
             { label: 'Back', accelerator: 'Alt+Left', registerAccelerator: false, click: () => { const w = BrowserWindow.getFocusedWindow(); if (isAlive(w)) navGo(w.webContents, 'back'); } },
             { label: 'Forward', accelerator: 'Alt+Right', registerAccelerator: false, click: () => { const w = BrowserWindow.getFocusedWindow(); if (isAlive(w)) navGo(w.webContents, 'forward'); } },
+            { role: 'reload' },
             { type: 'separator' },
-            { label: 'Toggle Quick Actions Panel', click: () => {
-                const s = loadSettings();
-                s.showSidebar = !s.showSidebar;
-                fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2));
-                BrowserWindow.getAllWindows().forEach(w => w.webContents.send('settings-changed', s));
-            }},
-            { type: 'separator' },
-            { label: 'Toggle Dark Mode', click: () => {
-                const s = loadSettings();
-                s.darkMode = !s.darkMode;
-                fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2));
-                toggleDarkMode(s.darkMode);
-            }},
-            { label: 'New Window (Ctrl+N)', accelerator: 'CmdOrCtrl+N', click: () => createWindow() },
+            { label: 'New Window', accelerator: 'CmdOrCtrl+N', click: () => createWindow() },
             { type: 'separator' },
             { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', click: () => {
                 const win = getMainWin();
@@ -1145,45 +1118,88 @@ function setupMenu() {
                 if (win) win.webContents.setZoomLevel(0);
             }},
             { type: 'separator' },
-            { role: 'reload' }
-        ]},
-        { label: 'Help', submenu: [
-            { label: 'About Tekmetric Pro', click: () => {
-                const win = getMainWin();
-                const opt = { type: 'info', title: 'About Tekmetric Pro', message: 'Tekmetric Pro v' + app.getVersion(),
-                    detail: "Craig's Leaside Automotive Inc.\nElectron " + process.versions.electron + '\nPDF log: ' + pdfLogPath() };
-                if (win) dialog.showMessageBox(win, opt); else dialog.showMessageBox(opt);
+            { label: 'Dark Mode (Toggle)', click: () => {
+                const s = loadSettings();
+                s.darkMode = !s.darkMode;
+                fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2));
+                toggleDarkMode(s.darkMode);
             }},
-            { label: 'About System', click: () => openAboutWindow() }
+            { label: 'Quick Actions Panel (Toggle)', click: () => {
+                const s = loadSettings();
+                s.showSidebar = !s.showSidebar;
+                fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2));
+                BrowserWindow.getAllWindows().forEach(w => w.webContents.send('settings-changed', s));
+            }},
         ]},
         { label: 'Tools', submenu: [
-            { label: 'Open PDF Log', click: () => { pdfLog('Open PDF Log clicked'); require('electron').shell.openPath(pdfLogPath()); } },
-            { label: 'Open Log Folder', click: () => { require('electron').shell.openPath(app.getPath('userData')); } },
-            { type: 'separator' },
-            { label: 'System Settings (API Keys)', click: () => requireAdmin(openSettingsEditor) },
-            { label: 'Toggle Auto Uppercase', click: () => {
+            { label: 'Print Documents', submenu: [
+                { label: 'Invoice Header: Shop Logo on Right', type: 'checkbox', checked: !!s.invoiceLogoRight, click: (item) => {
+                const cur = loadSettings();
+                cur.invoiceLogoRight = item.checked;
+                fs.writeFileSync(settingsPath, JSON.stringify(cur, null, 2));
+            }},
+                { label: 'Invoices & Inspections: Faint Watermark', type: 'checkbox', checked: !!s.workOrderWatermark, click: (item) => {
+                const cur = loadSettings();
+                cur.workOrderWatermark = item.checked;
+                fs.writeFileSync(settingsPath, JSON.stringify(cur, null, 2));
+            }}
+            ]},
+            { label: 'Tekmetric Page', submenu: [
+                { label: 'Auto Uppercase (Toggle)', click: () => {
                 const s = loadSettings();
                 s.autoCaps = !s.autoCaps;
                 fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2));
                 BrowserWindow.getAllWindows().forEach(w => w.webContents.send('settings-changed', s));
             }},
-            { label: 'Toggle Premium Features View', click: () => {
+                { label: 'Premium Features View (Toggle)', click: () => {
                 const s = loadSettings();
                 s.hidePremium = !s.hidePremium;
                 fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2));
                 BrowserWindow.getAllWindows().forEach(w => w.webContents.send('settings-changed', s));
             }},
+            ]},
             { type: 'separator' },
-            { label: 'Invoice Header: Shop Logo on Right', type: 'checkbox', checked: !!s.invoiceLogoRight, click: (item) => {
-                const cur = loadSettings();
-                cur.invoiceLogoRight = item.checked;
-                fs.writeFileSync(settingsPath, JSON.stringify(cur, null, 2));
+            { label: 'Purge System Cache', click: () => {
+                const tempDir = app.getPath('temp');
+                let count = 0;
+                try {
+                    const files = fs.readdirSync(tempDir);
+                    files.forEach(file => {
+                        if (file.startsWith('Leaside_RO_') && file.endsWith('.pdf')) {
+                            fs.unlinkSync(path.join(tempDir, file));
+                            count++;
+                        }
+                    });
+                    const win = getMainWin();
+                    const opt = { type: 'info', title: 'System Purge', message: `Purged ${count} temporary print files.` };
+                    if (win) dialog.showMessageBox(win, opt); else dialog.showMessageBox(opt);
+                } catch(e) {
+                    dialog.showErrorBox('Purge Error', e.message);
+                }
             }},
-            { label: 'Invoices: Faint Logo Watermark', type: 'checkbox', checked: !!s.workOrderWatermark, click: (item) => {
-                const cur = loadSettings();
-                cur.workOrderWatermark = item.checked;
-                fs.writeFileSync(settingsPath, JSON.stringify(cur, null, 2));
-            }}
+        ]},
+        { label: 'Help', submenu: [
+            { label: 'Check for Updates...', click: () => {
+                if (!canAutoUpdate()) {
+                    dialog.showMessageBox({ type: 'info', title: 'Updates', message: 'Automatic updates work only in the installed version (Tekmetric-Pro-Setup). This portable/dev copy will not update itself.' }).catch(() => {});
+                    return;
+                }
+                manualUpdateCheck = true;
+                autoUpdater.checkForUpdates().catch(() => {});
+            }},
+            { type: 'separator' },
+            { label: 'Troubleshooting', submenu: [
+                { label: 'Open PDF Log', click: () => { pdfLog('Open PDF Log clicked'); require('electron').shell.openPath(pdfLogPath()); } },
+                { label: 'Open Log Folder', click: () => { require('electron').shell.openPath(app.getPath('userData')); } }
+            ]},
+            { type: 'separator' },
+            { label: 'Version Info', click: () => {
+                const win = getMainWin();
+                const opt = { type: 'info', title: 'Version Info', message: 'Tekmetric Pro v' + app.getVersion(),
+                    detail: "Craig's Leaside Automotive Inc.\nElectron " + process.versions.electron + '\nPDF log: ' + pdfLogPath() };
+                if (win) dialog.showMessageBox(win, opt); else dialog.showMessageBox(opt);
+            }},
+            { label: 'About System', click: () => openAboutWindow() }
         ]}
     ];
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
@@ -1195,9 +1211,9 @@ async function networkStamp(buf, info) {
     if (!settings.invoiceLogoRight && !settings.workOrderWatermark) { pdfLog('network PDF: both toggles off, unchanged'); return null; }
     let header = null;
     try { header = await findHeader(buf); } catch (e) { header = null; }
-    const kind = (header && header.kind) || info.kind;
-    const flip = !!settings.invoiceLogoRight && !!header && kind !== 'workorder';
-    const wm = !!settings.workOrderWatermark && kind === 'invoice';
+    const kind = await detectKind(buf, header, info.kind);
+    const flip = !!settings.invoiceLogoRight && !!header && kind !== 'workorder' && kind !== 'inspection';
+    const wm = !!settings.workOrderWatermark && (kind === 'invoice' || kind === 'inspection');
     pdfLog('network PDF kind=' + kind + ' (url ' + info.kind + ', text ' + (header && header.kind) + ') headerFlipped=' + flip + ' watermark=' + wm);
     if (!flip && !wm) return null;
     const appFile = (f) => fs.readFileSync(path.join(__dirname, f));
@@ -1211,7 +1227,7 @@ async function networkStamp(buf, info) {
 function installDocumentInterceptor(ses, name) {
     try {
         const handler = makeHttpsHandler({
-            fetch: (req) => ses.fetch(req, { bypassCustomProtocolHandlers: true }),
+            fetch: makeSessionFetch(net, ses, pdfLog), // v2.3.7: keeps POST bodies + real redirects (parts punchouts)
             stamp: networkStamp,
             log: pdfLog
         });
@@ -1227,10 +1243,10 @@ async function processPdfData(arrayData, shopData) {
     let header = null;
     try { header = await findHeader(original); } catch (e) { header = null; }
     const settings = loadSettings();
-    const kind = header ? header.kind : null;
+    const kind = await detectKind(original, header, shopData.docType === 'inspection' ? 'inspection' : null);
     const isWorkOrder = kind === 'workorder' || shopData.docType === 'repair';
-    const flip = !!settings.invoiceLogoRight && !!header && kind !== 'workorder';
-    const wm = !!settings.workOrderWatermark && (kind === 'invoice' || shopData.docType === 'invoice');
+    const flip = !!settings.invoiceLogoRight && !!header && kind !== 'workorder' && kind !== 'inspection';
+    const wm = !!settings.workOrderWatermark && (kind === 'invoice' || kind === 'inspection' || shopData.docType === 'invoice');
     pdfLog('detected kind=' + kind + ' docType=' + shopData.docType + ' headerFlipped=' + flip + ' watermark=' + wm);
     let buffer = original;
     if (flip || wm) {

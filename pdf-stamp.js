@@ -96,4 +96,22 @@ async function stampPdf(bytes, opts = {}) {
   out.headerFlipped = headerFlipped; out.docKind = docKind;
   return out;
 }
-module.exports = { stampPdf, findHeader };
+// v2.3.6: detect a Tekmetric inspection sheet (DVI) from page-1 text, since it has no invoice-style header.
+async function isInspectionPdf(bytes) {
+  const doc = await getPdfjs().getDocument({ data: new Uint8Array(bytes), disableFontFace: true, isEvalSupported: false, verbosity: 0 }).promise;
+  try {
+    const page = await doc.getPage(1);
+    const tc = await page.getTextContent();
+    const text = tc.items.map(i => i.str).join(' ').replace(/\s+/g, ' ');
+    if (/^\s*(Invoice|Estimate) for RO #/im.test(text) && !/Inspection/i.test(text.slice(0, 400))) return false;
+    return /(Digital\s+Vehicle\s+Inspection|Vehicle\s+Inspection|Inspection\s+(Report|Results|Sheet|Summary)|Multi-?Point\s+Inspection|\bDVI\b|\bInspection\b)/i.test(text.slice(0, 1500));
+  } finally { doc.destroy(); }
+}
+
+// Overall kind: header text (invoice/estimate/workorder) wins; else 'inspection' by text; else urlKind.
+async function detectKind(bytes, header, urlKind) {
+  if (header && header.kind) return header.kind;
+  try { if (await isInspectionPdf(bytes)) return 'inspection'; } catch (e) {}
+  return urlKind || null;
+}
+module.exports = { stampPdf, findHeader, detectKind, isInspectionPdf };
