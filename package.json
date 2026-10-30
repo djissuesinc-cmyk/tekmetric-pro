@@ -42,14 +42,16 @@
       "!logins.json",
       "!users.json",
       "!out*/**",
-      "!dist/**"
+      "!dist/**",
+      "!node_modules/canvas/**"
     ],
     "directories": {
       "buildResources": "build"
     },
     "portable": {
       "artifactName": "Tekmetric-Pro-Portable-${version}.${ext}"
-    }
+    },
+    "npmRebuild": false
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
