@@ -1,4 +1,4 @@
-TEKMETRIC PRO - FULL SOURCE BACKUP (version 2.3.7)
+TEKMETRIC PRO - FULL SOURCE BACKUP (version 2.3.8)
 ==================================================
 
 This zip has all of the app's source code and the GitHub build setup.
@@ -11,7 +11,7 @@ RESTORE OR SET UP ON A NEW PC
 
 RELEASE AN UPDATE TO ALL SHOP PCs
 1. Make your changes.
-2. Open package.json and raise "version" (for example 2.3.7 -> 2.3.8).
+2. Open package.json and raise "version" (for example 2.3.8 -> 2.3.9).
 3. GitHub Desktop: type a Summary > Commit to main > Push origin.
 4. GitHub builds the installer by itself (takes about 3 minutes, under the Actions tab).
 5. Every installed PC finds the update on startup and installs it when the app closes.

@@ -37,10 +37,10 @@ async function findHeader(bytes) {
       return rest.slice(0, b + 1);
     };
     const shop = block(/^Craig's Leaside Automotive/i, /^https?:\/\//i, 'L');
-    const info = block(/^(Invoice for |Estimate for )?RO #/i, /^Vehicle:/i, 'R');
+    const info = block(/^(Invoice for |Estimate for |Inspection for )?RO #/i, /^Vehicle:/i, 'R');
     if (!shop || !info) return null;
     const bbox = ls => ({ x0: Math.min(...ls.map(l => l.x0)), x1: Math.max(...ls.map(l => l.x1)), top: Math.min(...ls.map(l => l.top)), bottom: Math.max(...ls.map(l => l.bottom)) });
-    const first = info[0].s; const kind = /^Invoice/i.test(first) ? 'invoice' : /^Estimate/i.test(first) ? 'estimate' : 'workorder';
+    const first = info[0].s; const kind = /^Invoice/i.test(first) ? 'invoice' : /^Estimate/i.test(first) ? 'estimate' : /^Inspection/i.test(first) ? 'inspection' : 'workorder';
     return { kind, width: vp.width, height: vp.height, shop: bbox(shop), info: info.map(l => ({ x0: l.x0, x1: l.x1, top: l.top, bottom: l.bottom })), infoBox: bbox(info) };
   } finally { doc.destroy(); }
 }
@@ -110,6 +110,9 @@ async function isInspectionPdf(bytes) {
 
 // Overall kind: header text (invoice/estimate/workorder) wins; else 'inspection' by text; else urlKind.
 async function detectKind(bytes, header, urlKind) {
+  // v2.3.8: findHeader falls back to 'workorder' for any header that isn't Invoice/Estimate, which an
+  // inspection sheet with the same shop header hits. A URL saying 'inspection' wins over that fallback.
+  if (urlKind === 'inspection' && (!header || !/^(invoice|estimate)$/.test(header.kind))) return 'inspection';
   if (header && header.kind) return header.kind;
   try { if (await isInspectionPdf(bytes)) return 'inspection'; } catch (e) {}
   return urlKind || null;

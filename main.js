@@ -5,10 +5,10 @@ const path = require('path');
 const fs = require('fs');
 const url = require('url');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
-const { stampPdf, findHeader, detectKind } = require('./pdf-stamp');
+const { stampPdf, findHeader, detectKind } = require('./pdf-async'); // v2.3.8: worker thread, no UI freeze
 const { brandCss, brandHeader } = require('./brand');
 const { makeSessionFetch } = require('./nav-fetch');
-const { makeHttpsHandler } = require('./doc-intercept');
+const { makeHttpsHandler, kindFromUrl, DOC_RE } = require('./doc-intercept');
 const os = require('os');
 // Bulletproof startup marker: written synchronously on 'ready' to every candidate folder
 app.on('ready', () => {
@@ -352,6 +352,24 @@ function pdfLog(msg) {
 ipcMain.on('get-pdf-hook', (event) => { event.returnValue = PDF_HOOK_SRC; });
 
 // Logging + main-world hook + fallback PDF detector for any window (main or child)
+// v2.3.8: if a Tekmetric /document/ invoice or inspection is rendered as an HTML page (not a PDF), the PDF
+// stamper never sees it; add the same faint watermark element used for silent prints (no header flip).
+function htmlDocWatermark(wc, id) {
+    try {
+        const u = wc.getURL();
+        if (!DOC_RE.test(u)) return;
+        const k = kindFromUrl(u);
+        if (k !== 'inspection' && k !== 'invoice') return;
+        if (!loadSettings().workOrderWatermark) return;
+        wc.executeJavaScript("document.contentType").then(ct => {
+            pdfLog(id + ' document page kind=' + k + ' contentType=' + ct);
+            if (ct !== 'text/html') return; // PDFs are handled by the network stamper
+            const w = BrowserWindow.fromWebContents(wc);
+            if (w) applyPrintLayout(w, k === 'invoice' ? 'invoice-wm-only' : 'inspection').catch(() => {});
+        }).catch(() => {});
+    } catch (e) {}
+}
+
 function instrumentPdfWindow(win, label, opener) {
     if (!isAlive(win)) return;
     const wc = win.webContents;
@@ -377,7 +395,7 @@ function instrumentPdfWindow(win, label, opener) {
         if (typeof u === 'string' && u.startsWith('blob:')) detect('frame-blob');
     });
     wc.on('dom-ready', inject);
-    wc.on('did-finish-load', () => { pdfLog(id + ' did-finish-load ' + wc.getURL()); inject(); detect('did-finish-load'); });
+    wc.on('did-finish-load', () => { pdfLog(id + ' did-finish-load ' + wc.getURL()); inject(); detect('did-finish-load'); htmlDocWatermark(wc, id); });
     wc.on('did-fail-load', (e, code, desc, u) => pdfLog(id + ' did-fail-load ' + code + ' ' + desc + ' ' + u));
     wc.on('render-process-gone', (e, d) => pdfLog(id + ' render-process-gone ' + (d && d.reason)));
     inject();
@@ -607,10 +625,10 @@ function printLayoutInPage(opts) {
                 if (opts.watermark && opts.logo && !document.getElementById('leaside-watermark')) {
                     const wm = document.createElement('div');
                     wm.id = 'leaside-watermark';
-                    wm.style.cssText = 'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:2147483646;-webkit-print-color-adjust:exact;print-color-adjust:exact;';
+                    wm.style.cssText = 'position:fixed;inset:0;overflow:hidden;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:2147483646;-webkit-print-color-adjust:exact;print-color-adjust:exact;';
                     const img = document.createElement('img');
                     img.src = opts.logo;
-                    img.style.cssText = 'width:62%;max-width:460px;opacity:' + opts.opacity + ';filter:grayscale(100%);';
+                    img.style.cssText = 'width:62%;max-width:460px;max-height:80vh;object-fit:contain;opacity:' + opts.opacity + ';filter:grayscale(100%);';
                     wm.appendChild(img);
                     document.body.appendChild(wm);
                 }
@@ -628,7 +646,7 @@ async function applyPrintLayout(win, docType) {
     const s = loadSettings();
     const opts = {
         logoRight: docType === 'invoice' && !!s.invoiceLogoRight,
-        watermark: (docType === 'invoice' || docType === 'inspection') && !!s.workOrderWatermark,
+        watermark: (docType === 'invoice' || docType === 'inspection' || docType === 'invoice-wm-only') && !!s.workOrderWatermark,
         opacity: 0.045,
         logo: null
     };
@@ -666,7 +684,8 @@ function checkAndPrintInspection(urlLoc) {
             closeCheck();
         } else {
             checkWin.webContents.insertCSS(globalCSS).catch(() => {});
-            setTimeout(() => {
+            setTimeout(async () => {
+                await applyPrintLayout(checkWin, 'inspection'); // v2.3.8: inspections get the faint watermark too
                 if (!checkWin.isDestroyed()) {
                     checkWin.webContents.print(
                         { silent: true, printBackground: true, copies: 1, duplexMode: 'longEdge' },
@@ -1062,12 +1081,45 @@ function setupMenu() {
     const presetJobs = s.presets || [];
 
     const template = [
-        { label: 'Shop Admin', submenu: [
+        { label: 'Shop', submenu: [
             { label: 'Login Selection', submenu: userMenu },
+            { label: 'New Window', accelerator: 'CmdOrCtrl+N', click: () => createWindow() },
             { type: 'separator' },
-            { label: 'Edit User Info...', click: () => requireAdmin(openUserEditor) },
-            { label: 'Edit Text Presets...', click: () => requireAdmin(openPresetsEditor) },
-            { label: 'System Settings (API Keys)...', click: () => requireAdmin(openSettingsEditor) },
+            { label: 'Print Settings', submenu: [
+                { label: 'Invoice Header: Shop Logo on Right', type: 'checkbox', checked: !!s.invoiceLogoRight, click: (item) => {
+                    const cur = loadSettings();
+                    cur.invoiceLogoRight = item.checked;
+                    fs.writeFileSync(settingsPath, JSON.stringify(cur, null, 2));
+                }},
+                { label: 'Invoices & Inspections: Faint Watermark', type: 'checkbox', checked: !!s.workOrderWatermark, click: (item) => {
+                    const cur = loadSettings();
+                    cur.workOrderWatermark = item.checked;
+                    fs.writeFileSync(settingsPath, JSON.stringify(cur, null, 2));
+                }}
+            ]},
+            { label: 'Admin (PIN)', submenu: [
+                { label: 'Edit User Info...', click: () => requireAdmin(openUserEditor) },
+                { label: 'Edit Text Presets...', click: () => requireAdmin(openPresetsEditor) },
+                { label: 'System Settings (API Keys)...', click: () => requireAdmin(openSettingsEditor) }
+            ]},
+            { label: 'Purge System Cache', click: () => {
+                const tempDir = app.getPath('temp');
+                let count = 0;
+                try {
+                    const files = fs.readdirSync(tempDir);
+                    files.forEach(file => {
+                        if (file.startsWith('Leaside_RO_') && file.endsWith('.pdf')) {
+                            fs.unlinkSync(path.join(tempDir, file));
+                            count++;
+                        }
+                    });
+                    const win = getMainWin();
+                    const opt = { type: 'info', title: 'System Purge', message: `Purged ${count} temporary print files.` };
+                    if (win) dialog.showMessageBox(win, opt); else dialog.showMessageBox(opt);
+                } catch(e) {
+                    dialog.showErrorBox('Purge Error', e.message);
+                }
+            }},
             { type: 'separator' },
             { role: 'quit' }
         ]},
@@ -1103,8 +1155,6 @@ function setupMenu() {
             { label: 'Forward', accelerator: 'Alt+Right', registerAccelerator: false, click: () => { const w = BrowserWindow.getFocusedWindow(); if (isAlive(w)) navGo(w.webContents, 'forward'); } },
             { role: 'reload' },
             { type: 'separator' },
-            { label: 'New Window', accelerator: 'CmdOrCtrl+N', click: () => createWindow() },
-            { type: 'separator' },
             { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', click: () => {
                 const win = getMainWin();
                 if (win) win.webContents.setZoomLevel(win.webContents.getZoomLevel() + 0.5);
@@ -1130,52 +1180,17 @@ function setupMenu() {
                 fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2));
                 BrowserWindow.getAllWindows().forEach(w => w.webContents.send('settings-changed', s));
             }},
-        ]},
-        { label: 'Tools', submenu: [
-            { label: 'Print Documents', submenu: [
-                { label: 'Invoice Header: Shop Logo on Right', type: 'checkbox', checked: !!s.invoiceLogoRight, click: (item) => {
-                const cur = loadSettings();
-                cur.invoiceLogoRight = item.checked;
-                fs.writeFileSync(settingsPath, JSON.stringify(cur, null, 2));
-            }},
-                { label: 'Invoices & Inspections: Faint Watermark', type: 'checkbox', checked: !!s.workOrderWatermark, click: (item) => {
-                const cur = loadSettings();
-                cur.workOrderWatermark = item.checked;
-                fs.writeFileSync(settingsPath, JSON.stringify(cur, null, 2));
-            }}
-            ]},
-            { label: 'Tekmetric Page', submenu: [
-                { label: 'Auto Uppercase (Toggle)', click: () => {
+            { label: 'Auto Uppercase (Toggle)', click: () => {
                 const s = loadSettings();
                 s.autoCaps = !s.autoCaps;
                 fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2));
                 BrowserWindow.getAllWindows().forEach(w => w.webContents.send('settings-changed', s));
             }},
-                { label: 'Premium Features View (Toggle)', click: () => {
+            { label: 'Premium Features View (Toggle)', click: () => {
                 const s = loadSettings();
                 s.hidePremium = !s.hidePremium;
                 fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2));
                 BrowserWindow.getAllWindows().forEach(w => w.webContents.send('settings-changed', s));
-            }},
-            ]},
-            { type: 'separator' },
-            { label: 'Purge System Cache', click: () => {
-                const tempDir = app.getPath('temp');
-                let count = 0;
-                try {
-                    const files = fs.readdirSync(tempDir);
-                    files.forEach(file => {
-                        if (file.startsWith('Leaside_RO_') && file.endsWith('.pdf')) {
-                            fs.unlinkSync(path.join(tempDir, file));
-                            count++;
-                        }
-                    });
-                    const win = getMainWin();
-                    const opt = { type: 'info', title: 'System Purge', message: `Purged ${count} temporary print files.` };
-                    if (win) dialog.showMessageBox(win, opt); else dialog.showMessageBox(opt);
-                } catch(e) {
-                    dialog.showErrorBox('Purge Error', e.message);
-                }
             }},
         ]},
         { label: 'Help', submenu: [
@@ -1187,7 +1202,6 @@ function setupMenu() {
                 manualUpdateCheck = true;
                 autoUpdater.checkForUpdates().catch(() => {});
             }},
-            { type: 'separator' },
             { label: 'Troubleshooting', submenu: [
                 { label: 'Open PDF Log', click: () => { pdfLog('Open PDF Log clicked'); require('electron').shell.openPath(pdfLogPath()); } },
                 { label: 'Open Log Folder', click: () => { require('electron').shell.openPath(app.getPath('userData')); } }

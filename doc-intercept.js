@@ -21,6 +21,9 @@ function isPdfBytes(buf) {
 // deps: { fetch(req) -> Promise<Response>, stamp(buf, {url, kind}) -> Promise<Buffer|null>, log(msg) }
 function makeHttpsHandler(deps) {
     const log = deps.log || (() => {});
+    // v2.3.8: Tekmetric's /document/... page (e.g. .../inspections?tz=..&hideImages=true) loads first, then
+    // the PDF bytes often arrive from another URL with no kind in it. Remember the last document kind briefly.
+    let lastDoc = null;
     return async function handle(req) {
         const u = req.url;
         const isDoc = DOC_RE.test(u);
@@ -31,6 +34,7 @@ function makeHttpsHandler(deps) {
         if (!isTek) return res;
         const ct = (res.headers.get('content-type') || '').toLowerCase();
         const maybePdf = ct.includes('application/pdf') || ct.includes('octet-stream') || ct.includes('application/x-pdf');
+        if (isDoc && kindFromUrl(u)) lastDoc = { kind: kindFromUrl(u), t: Date.now() };
         if (isDoc) log('doc ' + req.method + ' ' + u + ' -> ' + res.status + ' ct=' + (ct || '(none)'));
         if (!maybePdf && !isDoc) return res; // normal Tekmetric traffic: untouched
         if (!maybePdf && isDoc && !/text\/html|json|text\/plain/.test(ct)) return res;
@@ -41,7 +45,7 @@ function makeHttpsHandler(deps) {
         headers.delete('content-encoding'); // body is already decoded
         let out = buf;
         if (isPdfBytes(buf)) {
-            const kind = kindFromUrl(u);
+            const kind = kindFromUrl(u) || (lastDoc && Date.now() - lastDoc.t < 60000 ? lastDoc.kind : null);
             log('PDF caught (' + buf.length + ' bytes) kind=' + kind + ' ' + u);
             try { const s = await deps.stamp(buf, { url: u, kind }); if (s && s.length) out = Buffer.from(s); }
             catch (e) { log('network stamp failed: ' + (e && e.stack || e)); }
