@@ -64,8 +64,14 @@ function netNavigate(net, ses, req, body) {
 // deps: electron { net }, session
 function makeSessionFetch(net, ses, log) {
     return async (req) => {
+        // v2.3.9: GET/HEAD assets (parts catalogs load hundreds) skip body buffering entirely.
+        // Navigations and body-bearing methods still buffer so punchout POSTs + redirects work.
+        const nav = isNavigation(req);
+        if (!nav && (req.method === 'GET' || req.method === 'HEAD')) {
+            return ses.fetch(req, { bypassCustomProtocolHandlers: true });
+        }
         const body = await readBody(req);
-        if (isNavigation(req)) {
+        if (nav) {
             if (log && req.method !== 'GET') log('nav ' + req.method + ' ' + req.url + ' body=' + (body ? body.length : 0));
             return netNavigate(net, ses, req, body);
         }

@@ -5,7 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const url = require('url');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
-const { stampPdf, findHeader, detectKind } = require('./pdf-async'); // v2.3.8: worker thread, no UI freeze
+const { stampPdf, findHeader, detectKind, stampJob, prewarm: prewarmPdfWorker } = require('./pdf-async'); // v2.3.9: long-lived worker + combined stampJob
 const { brandCss, brandHeader } = require('./brand');
 const { makeSessionFetch } = require('./nav-fetch');
 const { makeHttpsHandler, kindFromUrl, DOC_RE } = require('./doc-intercept');
@@ -54,9 +54,14 @@ function jsLiteral(value) {
 
 function isAlive(w) { return !!(w && !w.isDestroyed()); }
 
+const logoDataUrlCache = new Map();
 function logoDataUrl(name = 'logo.png') {
-    try { return 'data:image/png;base64,' + fs.readFileSync(path.join(__dirname, name)).toString('base64'); }
-    catch (e) { return 'local-resource://' + name; }
+    if (logoDataUrlCache.has(name)) return logoDataUrlCache.get(name);
+    try {
+        const v = 'data:image/png;base64,' + fs.readFileSync(path.join(__dirname, name)).toString('base64');
+        logoDataUrlCache.set(name, v);
+        return v;
+    } catch (e) { return 'local-resource://' + name; }
 }
 
 require('dotenv').config({ path: path.join(__dirname, '.env') });
@@ -305,6 +310,15 @@ function createWindow(targetUrl = 'https://shop.tekmetric.com/') {
     return win;
 }
 
+// v2.3.9: only PDF/print windows need hook injection + frame scanning. Parts punchouts
+// (Nexpart / PartsTech) leave about:blank for an external host — stop watching them.
+function isPdfWatchUrl(u) {
+    if (!u || u === 'about:blank') return true;
+    if (/^blob:/i.test(u)) return true;
+    if (/tekmetric\.com/i.test(u)) return true;
+    return false;
+}
+
 // Tekmetric prints by opening about:blank and then pointing it at a blob: PDF (or writing an
 // <embed>/<iframe> with the blob into it). Catch that, stamp the bytes and show our print pop-up.
 function watchChildForPdf(opener, child) {
@@ -328,6 +342,7 @@ function watchChildForPdf(opener, child) {
     const poll = setInterval(() => {
         if (done || child.isDestroyed() || ++tries > 40) { clearInterval(poll); return; }
         const cur = wc.getURL();
+        if (!isPdfWatchUrl(cur)) { clearInterval(poll); return; } // parts punchout — leave alone
         if (cur.startsWith('blob:')) { grab(cur, 'loaded'); return; }
         wc.executeJavaScript("(() => { const el = document.querySelector('embed[src^=\"blob:\"],iframe[src^=\"blob:\"],object[data^=\"blob:\"]'); return el ? (el.src || el.data) : ''; })()")
             .then(src => { if (src) grab(src, 'embedded'); }).catch(() => {});
@@ -336,18 +351,26 @@ function watchChildForPdf(opener, child) {
 }
 
 function pdfLogPath() { return path.join(app.getPath('userData'), 'pdf-stamp.log'); }
-function pdfLog(msg) {
-    const line = new Date().toISOString() + ' ' + msg + '\n';
+// v2.3.9: coalesce log lines so parts-popup subframe noise does not sync-write on every request
+let _pdfLogBuf = '';
+let _pdfLogTimer = null;
+function pdfLogFlush() {
+    _pdfLogTimer = null;
+    const chunk = _pdfLogBuf; _pdfLogBuf = '';
+    if (!chunk) return;
     try {
         fs.mkdirSync(app.getPath('userData'), { recursive: true });
         const p = pdfLogPath();
         try { if (fs.statSync(p).size > 5 * 1024 * 1024) fs.renameSync(p, p + '.old'); } catch (e) {}
-        fs.appendFileSync(p, line);
+        fs.appendFileSync(p, chunk);
     } catch (e) {
-        try { fs.appendFileSync(path.join(os.tmpdir(), 'tekmetric-pro-pdf-stamp.log'), line); } catch (e2) {}
+        try { fs.appendFileSync(path.join(os.tmpdir(), 'tekmetric-pro-pdf-stamp.log'), chunk); } catch (e2) {}
     }
-    // Portable build: also keep a copy next to the exe so it is easy to find
-    try { if (process.env.PORTABLE_EXECUTABLE_DIR) fs.appendFileSync(path.join(process.env.PORTABLE_EXECUTABLE_DIR, 'tekmetric-pro-pdf-stamp.log'), line); } catch (e3) {}
+    try { if (process.env.PORTABLE_EXECUTABLE_DIR) fs.appendFileSync(path.join(process.env.PORTABLE_EXECUTABLE_DIR, 'tekmetric-pro-pdf-stamp.log'), chunk); } catch (e3) {}
+}
+function pdfLog(msg) {
+    _pdfLogBuf += new Date().toISOString() + ' ' + msg + '\n';
+    if (!_pdfLogTimer) _pdfLogTimer = setTimeout(pdfLogFlush, 50);
 }
 ipcMain.on('get-pdf-hook', (event) => { event.returnValue = PDF_HOOK_SRC; });
 
@@ -376,6 +399,7 @@ function instrumentPdfWindow(win, label, opener) {
     const id = label + '#' + wc.id;
     const inject = () => {
         if (wc.isDestroyed()) return;
+        if (!isPdfWatchUrl(wc.getURL())) return; // v2.3.9: never inject PDF hook into Nexpart/PartsTech
         wc.executeJavaScript(PDF_HOOK_SRC).then(r => { if (r === 'installed') pdfLog(id + ' hook injected from main @ ' + wc.getURL()); })
             .catch(e => pdfLog(id + ' hook inject error: ' + (e && e.message)));
     };
@@ -387,12 +411,14 @@ function instrumentPdfWindow(win, label, opener) {
     wc.on('did-start-navigation', (details, u, isInPlace, isMainFrame) => {
         const url = (details && typeof details === 'object' && details.url) ? details.url : u;
         const main = (details && typeof details === 'object' && 'isMainFrame' in details) ? details.isMainFrame : isMainFrame;
-        pdfLog(id + ' did-start-navigation ' + (main ? 'main' : 'sub') + ' ' + url);
+        // v2.3.9: skip noisy subframe logs on external punchout catalogs
+        if (!main && !isPdfWatchUrl(wc.getURL())) return;
+        if (main || isPdfWatchUrl(url)) pdfLog(id + ' did-start-navigation ' + (main ? 'main' : 'sub') + ' ' + url);
     });
-    wc.on('did-navigate', (e, u) => { pdfLog(id + ' did-navigate ' + u); detect('did-navigate'); });
+    wc.on('did-navigate', (e, u) => { pdfLog(id + ' did-navigate ' + u); if (isPdfWatchUrl(u)) detect('did-navigate'); });
     wc.on('did-frame-navigate', (e, u, code, status, isMain) => {
-        if (!isMain) pdfLog(id + ' did-frame-navigate ' + u);
         if (typeof u === 'string' && u.startsWith('blob:')) detect('frame-blob');
+        else if (!isMain && isPdfWatchUrl(wc.getURL())) pdfLog(id + ' did-frame-navigate ' + u);
     });
     wc.on('dom-ready', inject);
     wc.on('did-finish-load', () => { pdfLog(id + ' did-finish-load ' + wc.getURL()); inject(); detect('did-finish-load'); htmlDocWatermark(wc, id); });
@@ -405,6 +431,7 @@ function instrumentPdfWindow(win, label, opener) {
     const isChild = !!opener;
     async function detect(why) {
         if (wc.isDestroyed()) return;
+        if (!isPdfWatchUrl(wc.getURL())) return; // v2.3.9: parts popup — do not walk frames
         let frames = [];
         try { frames = wc.mainFrame ? wc.mainFrame.framesInSubtree : []; } catch (e) {}
         for (const f of frames) {
@@ -635,7 +662,7 @@ function printLayoutInPage(opts) {
             } catch (e) {}
             const waiting = opts.logoRight && !document.documentElement.hasAttribute('data-leaside-logo-right');
             if (waiting && Date.now() - started < 4000) setTimeout(tick, 250);
-            else setTimeout(resolve, 200);
+            else resolve(); // v2.3.9: no extra 200ms delay after layout is ready
         };
         tick();
     });
@@ -792,6 +819,7 @@ function requireAdmin(callback) {
         alwaysOnTop: true,
         autoHideMenuBar: true, resizable: false, show: false,
         title: 'Admin Verification',
+        backgroundColor: '#121212',
         webPreferences: { nodeIntegration: true, contextIsolation: false }
     });
     
@@ -849,7 +877,8 @@ function openSettingsEditor() {
         parent: parentWin || undefined, 
         modal: !!parentWin, 
         alwaysOnTop: true,
-        autoHideMenuBar: true, title: "API Settings", icon: path.join(__dirname, 'logo.png'), 
+        autoHideMenuBar: true, title: "API Settings", icon: path.join(__dirname, 'logo.png'),
+        backgroundColor: '#121212', 
         webPreferences: { nodeIntegration: true, contextIsolation: false } 
     });
     const s = loadSettings();
@@ -889,7 +918,8 @@ function openUserEditor() {
         parent: parentWin || undefined, 
         modal: !!parentWin, 
         alwaysOnTop: true,
-        autoHideMenuBar: true, title: "Edit User Info", icon: path.join(__dirname, 'logo.png'), 
+        autoHideMenuBar: true, title: "Edit User Info", icon: path.join(__dirname, 'logo.png'),
+        backgroundColor: '#121212', 
         webPreferences: { nodeIntegration: true, contextIsolation: false } 
     });
     const usersData = fs.readFileSync(usersPath, 'utf8');
@@ -930,7 +960,8 @@ function openPresetsEditor() {
         parent: parentWin || undefined, 
         modal: !!parentWin, 
         alwaysOnTop: true,
-        autoHideMenuBar: true, title: "Edit Text Presets", icon: path.join(__dirname, 'logo.png'), 
+        autoHideMenuBar: true, title: "Edit Text Presets", icon: path.join(__dirname, 'logo.png'),
+        backgroundColor: '#121212', 
         webPreferences: { nodeIntegration: true, contextIsolation: false } 
     });
     const s = loadSettings();
@@ -1207,12 +1238,6 @@ function setupMenu() {
                 { label: 'Open Log Folder', click: () => { require('electron').shell.openPath(app.getPath('userData')); } }
             ]},
             { type: 'separator' },
-            { label: 'Version Info', click: () => {
-                const win = getMainWin();
-                const opt = { type: 'info', title: 'Version Info', message: 'Tekmetric Pro v' + app.getVersion(),
-                    detail: "Craig's Leaside Automotive Inc.\nElectron " + process.versions.electron + '\nPDF log: ' + pdfLogPath() };
-                if (win) dialog.showMessageBox(win, opt); else dialog.showMessageBox(opt);
-            }},
             { label: 'About System', click: () => openAboutWindow() }
         ]}
     ];
@@ -1223,19 +1248,21 @@ function setupMenu() {
 async function networkStamp(buf, info) {
     const settings = loadSettings();
     if (!settings.invoiceLogoRight && !settings.workOrderWatermark) { pdfLog('network PDF: both toggles off, unchanged'); return null; }
-    let header = null;
-    try { header = await findHeader(buf); } catch (e) { header = null; }
-    const kind = await detectKind(buf, header, info.kind);
-    const flip = !!settings.invoiceLogoRight && !!header && kind !== 'workorder' && kind !== 'inspection';
-    const wm = !!settings.workOrderWatermark && (kind === 'invoice' || kind === 'inspection');
-    pdfLog('network PDF kind=' + kind + ' (url ' + info.kind + ', text ' + (header && header.kind) + ') headerFlipped=' + flip + ' watermark=' + wm);
-    if (!flip && !wm) return null;
-    const appFile = (f) => fs.readFileSync(path.join(__dirname, f));
-    return Buffer.from(await stampPdf(buf, {
-        flipHeader: flip, watermark: wm, opacity: 0.045,
-        logoPng: appFile('logo.png'),
-        watermarkPng: appFile(fs.existsSync(path.join(__dirname, 'logo-watermark.png')) ? 'logo-watermark.png' : 'logo.png')
-    }));
+    const wmPath = path.join(__dirname, fs.existsSync(path.join(__dirname, 'logo-watermark.png')) ? 'logo-watermark.png' : 'logo.png');
+    // v2.3.9: one worker round-trip; PNGs cached inside the worker by path
+    const r = await stampJob(buf, {
+        urlKind: info.kind,
+        flipHeader: !!settings.invoiceLogoRight,
+        watermark: !!settings.workOrderWatermark,
+        opacity: 0.045,
+        logoPath: path.join(__dirname, 'logo.png'),
+        watermarkPath: wmPath
+    });
+    const flip = !!r && !!r.headerFlipped;
+    const wm = !!r && !r.skipped && !!settings.workOrderWatermark;
+    pdfLog('network PDF kind=' + (r && r.docKind) + ' (url ' + info.kind + ', text ' + (r && r.header && r.header.kind) + ') headerFlipped=' + flip + ' watermark=' + (!!r && !r.skipped && (r.docKind === 'invoice' || r.docKind === 'inspection')) );
+    if (!r || r.skipped || !r.bytes) return null;
+    return Buffer.from(r.bytes);
 }
 
 function installDocumentInterceptor(ses, name) {
@@ -1253,26 +1280,34 @@ function installDocumentInterceptor(ses, name) {
 async function processPdfData(arrayData, shopData) {
     shopData = shopData || {};
     const original = Buffer.from(arrayData);
-    // Find Tekmetric's header from the PDF's own text (invoice / estimate / work order)
-    let header = null;
-    try { header = await findHeader(original); } catch (e) { header = null; }
     const settings = loadSettings();
-    const kind = await detectKind(original, header, shopData.docType === 'inspection' ? 'inspection' : null);
-    const isWorkOrder = kind === 'workorder' || shopData.docType === 'repair';
-    const flip = !!settings.invoiceLogoRight && !!header && kind !== 'workorder' && kind !== 'inspection';
-    const wm = !!settings.workOrderWatermark && (kind === 'invoice' || kind === 'inspection' || shopData.docType === 'invoice');
-    pdfLog('detected kind=' + kind + ' docType=' + shopData.docType + ' headerFlipped=' + flip + ' watermark=' + wm);
-    let buffer = original;
-    if (flip || wm) {
+    const urlKind = shopData.docType === 'inspection' ? 'inspection' : null;
+    const wantFlip = !!settings.invoiceLogoRight;
+    const wantWm = !!settings.workOrderWatermark;
+    let header = null, kind = null, buffer = original;
+    if (wantFlip || wantWm) {
         try {
-            const appFile = (f) => fs.readFileSync(path.join(__dirname, f));
-            buffer = Buffer.from(await stampPdf(original, {
-                flipHeader: flip, watermark: wm, opacity: 0.045,
-                logoPng: appFile('logo.png'),
-                watermarkPng: appFile(fs.existsSync(path.join(__dirname, 'logo-watermark.png')) ? 'logo-watermark.png' : 'logo.png')
-            }));
+            const wmPath = path.join(__dirname, fs.existsSync(path.join(__dirname, 'logo-watermark.png')) ? 'logo-watermark.png' : 'logo.png');
+            const r = await stampJob(original, {
+                urlKind,
+                flipHeader: wantFlip,
+                watermark: wantWm,
+                forceWm: shopData.docType === 'invoice',
+                opacity: 0.045,
+                logoPath: path.join(__dirname, 'logo.png'),
+                watermarkPath: wmPath
+            });
+            header = r && r.header;
+            kind = (r && r.docKind) || null;
+            if (r && !r.skipped && r.bytes) buffer = Buffer.from(r.bytes);
+            pdfLog('detected kind=' + kind + ' docType=' + shopData.docType + ' headerFlipped=' + !!(r && r.headerFlipped) + ' watermark=' + !!(r && !r.skipped && wantWm));
         } catch (e) { pdfLog('stamp failed: ' + (e && e.stack || e)); console.error('PDF stamp failed, using original:', e); buffer = original; }
+    } else {
+        try { header = await findHeader(original); } catch (e) { header = null; }
+        try { kind = await detectKind(original, header, urlKind); } catch (e) { kind = null; }
+        pdfLog('detected kind=' + kind + ' docType=' + shopData.docType + ' headerFlipped=false watermark=false');
     }
+    const isWorkOrder = kind === 'workorder' || shopData.docType === 'repair';
     const pdfDoc = await PDFDocument.load(buffer);
     const pages = pdfDoc.getPages();
     if (!pages.length) throw new Error('The document has no pages.');
@@ -1444,6 +1479,7 @@ app.whenReady().then(() => {
             '; log=' + pdfLogPath() + '; invoiceLogoRight=' + s0.invoiceLogoRight + ' workOrderWatermark=' + s0.workOrderWatermark +
             '; portable=' + (process.env.PORTABLE_EXECUTABLE_FILE || 'no'));
     } catch (e) { pdfLog('startup log error: ' + e.message); }
+    try { prewarmPdfWorker(); } catch (e) {}
     createWindow();
     setupMenu();
     if (canAutoUpdate()) autoUpdater.checkForUpdates().catch(() => {});

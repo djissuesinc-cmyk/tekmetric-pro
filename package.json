@@ -1,6 +1,6 @@
 {
   "name": "tekmetric-pro-app",
-  "version": "2.3.8",
+  "version": "2.3.9",
   "author": "Shawn Bradbury",
   "description": "Shop management interface",
   "main": "main.js",

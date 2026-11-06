@@ -1,5 +1,6 @@
-// Shop branding for the app's internal windows (v2.3.6): Craig's Leaside fonts bundled locally
+// Shop branding for the app's internal windows (v2.3.6+): Craig's Leaside fonts bundled locally
 // (assets/fonts, embedded as base64 so data: URL windows can use them; no CDN) + logo header.
+// v2.3.9: always light text on dark backgrounds so headings/labels stay readable in dark mode.
 const fs = require('fs');
 const path = require('path');
 const FONTS = [
@@ -18,11 +19,14 @@ function brandCss() {
         } catch (e) { /* font missing: fall back to system fonts */ }
     }
     cssCache = `<style>${faces}
-body{font-family:'Inter','Segoe UI',Arial,sans-serif !important;}
+html,body{background:#121212 !important;color:#e8e8e8 !important;font-family:'Inter','Segoe UI',Arial,sans-serif !important;}
+h1,h2,h3,h4,h5,label,p,span,div,li,td,th{color:#e8e8e8 !important;}
 h1,h2,h3,button{font-family:'Oswald','Segoe UI',Impact,sans-serif !important;letter-spacing:.04em;text-transform:uppercase;font-weight:600;}
-button{background:#E30613 !important;border-radius:4px;}
+button{background:#E30613 !important;color:#ffffff !important;border:none;border-radius:4px;}
 button:hover{filter:brightness(1.1);}
-input:focus,textarea:focus{outline:1px solid #E30613;}
+input,textarea,select{background:#222 !important;color:#ffffff !important;border:1px solid #555 !important;}
+input:focus,textarea:focus,select:focus{outline:1px solid #E30613;}
+a{color:#ef5350;}
 .brand-hdr{text-align:center;margin:0 0 10px;}
 .brand-hdr img{height:56px;}
 </style>`;

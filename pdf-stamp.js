@@ -62,8 +62,8 @@ async function stampPdf(bytes, opts = {}) {
   }
 
   if (flipHeader && logoPng && pages.length) {
-    let hd = null;
-    try { hd = await findHeader(bytes); } catch (e) { hd = null; }
+    let hd = opts.header || null;
+    if (!hd) { try { hd = await findHeader(bytes); } catch (e) { hd = null; } }
     if (hd) docKind = hd.kind;
     if (hd && (!opts.kinds || opts.kinds.includes(hd.kind))) {
       const page = pages[0];
