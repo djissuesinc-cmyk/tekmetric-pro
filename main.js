@@ -565,7 +565,8 @@ function applyDarkMode(win, enabled) {
                    "    .MuiPaper-root, .MuiCard-root, .MuiDrawer-paper, .MuiDialog-paper, main, [class*=\"bg-white\"], [class*=\"bg-gray-\"] { background-color: #ffffff !important; } " +
                    "    input, textarea, select { background-color: #ffffff !important; } " +
                    "    div[role=\"alert\"], .Toastify__toast, .MuiSnackbarContent-root { background-color: #333333 !important; color: #ffffff !important; filter: invert(100%) hue-rotate(180deg) !important; } " +
-                   "    div[role=\"alert\"] div, div[role=\"alert\"] span, .MuiSnackbarContent-root div, .MuiSnackbarContent-root span { color: #ffffff !important; } ';" +
+                   "    div[role=\"alert\"] div, div[role=\"alert\"] span, .MuiSnackbarContent-root div, .MuiSnackbarContent-root span { color: #ffffff !important; } " +
+                   "    div[role=\"alert\"] button, div[role=\"alert\"] button svg, div[role=\"alert\"] button svg path, .MuiAlert-action button, .MuiAlert-action svg, .MuiAlert-action svg path, .MuiSnackbarContent-action button, .MuiSnackbarContent-action svg, .MuiSnackbarContent-action svg path, .Toastify__close-button, .Toastify__close-button svg, .Toastify__close-button svg path { color: #ffffff !important; fill: #ffffff !important; opacity: 1 !important; } ';" +
                    "    document.head.appendChild(style);" +
                    "}";
                    
