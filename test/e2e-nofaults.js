@@ -1,7 +1,10 @@
-// v2.4.2 Electron e2e: Fill "No Faults" on a mock inspection page, including a
+// v2.4.3 Electron e2e: Fill "No Faults" on a mock inspection page, including a
 // live-Tekmetric layout (MUI Select via mousedown + portal menu, ratings in a
 // sibling cell, Add finding opening a portal, global search + concerns that
-// must not be touched) and a heavy 5000-node page with no long task > 200ms.
+// must not be touched), a heavy 5000-node page with no long task > 200ms, a
+// shared-parent page where Concerns sits above the inspection with its own
+// Add finding / Rate buttons / Add Concern (must never be clicked), and a
+// no-card page that must log "card not found" and do nothing.
 // Run: xvfb-run npx electron test/e2e-nofaults.js
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path'), fs = require('fs'), os = require('os');
@@ -298,6 +301,165 @@ try {
 </script>
 </body></html>`;
 
+
+// Scenario C: Concerns sits ABOVE the inspection, sharing one #page parent
+// (no separate insp-card wrapper). Concerns has "Customer Concerns", "Add Concern",
+// Add finding, Add media, Edit, Rate-like buttons, and a pre-existing listbox
+// plus a stale portal textarea — none of these may be clicked or written.
+const SHARE_TASKS = ['WARNING LIGHTS ON DASH', 'CABIN AIR FILTER', 'HORN', 'BATTERY & TERMINALS', 'ALTERNATOR', 'OTHER FAULTS FOUND'];
+function shareRow(name) {
+  const isAdd = name === 'HORN';
+  const findings = isAdd
+    ? `<button type="button" class="add-finding insp-add">Add finding</button>`
+    : `<textarea class="insp-ta" data-task="${name}"></textarea>`;
+  return `<div class="grid-row insp-row" data-task="${name}">
+    <div class="rating-cell">
+      <div class="ratings">
+        <button type="button" class="rate rate-ok insp-rate" aria-label="Checked &amp; Okay" aria-pressed="false"></button>
+        <button type="button" class="rate insp-rate" aria-label="Requires Attention Soon" aria-pressed="false"></button>
+        <button type="button" class="rate insp-rate" aria-label="Requires Immediate Attention" aria-pressed="false"></button>
+        <button type="button" class="rate insp-rate" aria-label="Not Applicable" aria-pressed="false"></button>
+      </div>
+    </div>
+    <div class="name-cell"><div role="row"><span>${name}</span>${findings}</div></div>
+  </div>`;
+}
+function concernRow(label) {
+  return `<div class="concern-row" data-concern="${label}">
+    <div class="ratings">
+      <button type="button" class="rate rate-ok concern-rate" aria-label="Checked &amp; Okay" aria-pressed="false"></button>
+      <button type="button" class="rate concern-rate" aria-label="Requires Attention Soon" aria-pressed="false"></button>
+      <button type="button" class="rate concern-rate" aria-label="Requires Immediate Attention" aria-pressed="false"></button>
+      <button type="button" class="rate concern-rate" aria-label="Not Applicable" aria-pressed="false"></button>
+    </div>
+    <span>${label}</span>
+    <button type="button" class="add-finding concern-add">Add finding</button>
+    <button type="button" class="concern-media">Add media</button>
+    <button type="button" class="concern-edit">Edit</button>
+  </div>`;
+}
+const htmlShared = `<!doctype html><html><body>
+<div id="page">
+  <header>
+    <input id="global-search" type="text" placeholder="Search Tekmetric..." />
+  </header>
+  <div id="concerns-section" class="concerns">
+    <h3 id="concerns-heading">Customer Concerns</h3>
+    <button type="button" id="add-concern">Add Concern</button>
+    ${concernRow('4 NEW WINTER TIRES')}
+    ${concernRow('-> SUMMERS IN BAGS INTO VEHICLE PLEASE')}
+    <ul id="concern-fake-menu" role="listbox">
+      <li role="option" id="concern-green" aria-label="Checked &amp; Okay" data-value="ok">trap</li>
+    </ul>
+  </div>
+  <h2>30 POINT VEHICLE INSPECTION</h2>
+  <div>All edits will be auto-saved</div>
+  <div class="toolbar">
+    <button type="button" id="rate-all-btn">Rate All Tasks</button>
+    <div id="rate-all-menu" hidden>
+      <button type="button" role="menuitem" id="rate-all-ok">Checked &amp; Okay</button>
+      <button type="button" role="menuitem">Requires Attention Soon</button>
+    </div>
+  </div>
+  <div class="cols">Rating | Inspection Task | Findings</div>
+  ${SHARE_TASKS.map(shareRow).join('\\n')}
+</div>
+<div class="MuiPopover-root" id="stale-concern-portal">
+  <textarea id="stale-concern-ta" class="portal-finding">do not touch</textarea>
+</div>
+<script>
+window.__rateAllUsed = false;
+window.__rowRateClicks = 0;
+window.__concernClicked = false;
+window.__concernRated = false;
+window.__concernsOpened = false;
+window.__addConcernClicked = false;
+window.__concernMedia = false;
+window.__concernMenuClicked = false;
+window.__concernEdit = false;
+function markConcern(which) {
+  window.__concernsOpened = true;
+  if (which) window[which] = true;
+}
+document.getElementById('concerns-heading').addEventListener('click', () => markConcern());
+document.getElementById('add-concern').addEventListener('click', () => markConcern('__addConcernClicked'));
+document.getElementById('concern-green').addEventListener('mousedown', () => markConcern('__concernMenuClicked'));
+document.getElementById('concern-green').addEventListener('click', () => markConcern('__concernMenuClicked'));
+document.addEventListener('mousedown', (e) => {
+  if (e.target.closest('.concern-add')) { markConcern('__concernClicked'); return; }
+  if (e.target.closest('.concern-media')) { markConcern('__concernMedia'); return; }
+  if (e.target.closest('.concern-edit')) { markConcern('__concernEdit'); return; }
+  if (e.target.closest('.concern-rate')) { markConcern('__concernRated'); return; }
+  const add = e.target.closest('.insp-add');
+  if (!add) return;
+  e.preventDefault();
+  const row = add.closest('.insp-row');
+  const ta = document.createElement('textarea');
+  ta.className = 'insp-ta portal-finding';
+  ta.setAttribute('data-task', row.getAttribute('data-task'));
+  const pop = document.createElement('div');
+  pop.className = 'MuiPopover-root';
+  pop.appendChild(ta);
+  document.body.appendChild(pop);
+  ta.focus();
+  const save = () => { row.setAttribute('data-finding', ta.value || ''); };
+  ta.addEventListener('input', save);
+  ta.addEventListener('change', save);
+  ta.addEventListener('blur', save);
+});
+document.addEventListener('click', (e) => {
+  if (e.target.closest('#rate-all-btn')) {
+    document.getElementById('rate-all-menu').hidden = !document.getElementById('rate-all-menu').hidden;
+    return;
+  }
+  if (e.target.closest('#rate-all-ok')) {
+    window.__rateAllUsed = true;
+    document.querySelectorAll('.insp-row').forEach(row => {
+      row.querySelectorAll('.insp-rate').forEach(b => { b.setAttribute('aria-pressed', 'false'); b.classList.remove('selected'); });
+      const g = row.querySelector('.insp-rate.rate-ok');
+      if (g) { g.setAttribute('aria-pressed', 'true'); g.classList.add('selected'); }
+    });
+    document.getElementById('rate-all-menu').hidden = true;
+    return;
+  }
+  const rate = e.target.closest('.insp-rate');
+  if (rate) {
+    window.__rowRateClicks = (window.__rowRateClicks || 0) + 1;
+    const row = rate.closest('.insp-row');
+    row.querySelectorAll('.insp-rate').forEach(b => { b.setAttribute('aria-pressed', 'false'); b.classList.remove('selected'); });
+    rate.setAttribute('aria-pressed', 'true');
+    rate.classList.add('selected');
+  }
+});
+</script>
+</body></html>`;
+
+// Scenario D: only Concerns + header, no inspection card. Fill must do nothing.
+const htmlNoCard = `<!doctype html><html><body>
+<header><input id="global-search" type="text" placeholder="Search Tekmetric..." /></header>
+<div id="concerns-section" class="concerns">
+  <h3 id="concerns-heading">Client Concerns</h3>
+  <button type="button" id="add-concern">Add Concern</button>
+  <div class="concern-row">
+    4 NEW WINTER TIRES
+    <button type="button" class="add-finding concern-add">Add finding</button>
+    <button type="button">Add media</button>
+    <button type="button">Edit</button>
+  </div>
+</div>
+<script>
+window.__concernClicked = false;
+window.__addConcernClicked = false;
+window.__concernsOpened = false;
+document.getElementById('concerns-heading').addEventListener('click', () => { window.__concernsOpened = true; });
+document.getElementById('add-concern').addEventListener('click', () => { window.__addConcernClicked = true; window.__concernsOpened = true; });
+document.addEventListener('mousedown', (e) => {
+  if (e.target.closest('.concern-add')) window.__concernClicked = true;
+});
+</script>
+</body></html>`;
+
+
 function fail(msg) { console.error('NOFAULTS E2E FAIL:', msg); app.exit(1); }
 
 app.whenReady().then(async () => {
@@ -451,6 +613,78 @@ app.whenReady().then(async () => {
     if (long.length) throw new Error('B: longtask > 200ms: ' + JSON.stringify(long));
 
     console.log('NOFAULTS E2E B OK elapsed=' + elapsed + ' maxSlice=' + slice + ' portals=' + sB.portals);
+
+    // ---------- Scenario C: Concerns above, shared parent, rate-like buttons ----------
+    seen.length = 0;
+    logs.length = 0;
+    await w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(htmlShared));
+    await new Promise(r => setTimeout(r, 200));
+    await run('fill-no-faults');
+    const sC = await w.webContents.executeJavaScript(`(() => ({
+      rateAllUsed: !!window.__rateAllUsed,
+      rowClicks: window.__rowRateClicks || 0,
+      concernClicked: !!window.__concernClicked,
+      concernRated: !!window.__concernRated,
+      concernsOpened: !!window.__concernsOpened,
+      addConcernClicked: !!window.__addConcernClicked,
+      concernMedia: !!window.__concernMedia,
+      concernMenuClicked: !!window.__concernMenuClicked,
+      concernEdit: !!window.__concernEdit,
+      search: (document.getElementById('global-search') || {}).value || '',
+      stale: (document.getElementById('stale-concern-ta') || {}).value || '',
+      rows: [...document.querySelectorAll('.insp-row')].map(r => {
+        const ta = r.querySelector('textarea');
+        const finding = (ta && ta.value) || r.getAttribute('data-finding') || '';
+        const g = r.querySelector('.insp-rate.rate-ok');
+        return { task: r.getAttribute('data-task'), finding, green: g ? g.getAttribute('aria-pressed') : null };
+      }),
+      concernText: [...document.querySelectorAll('.concern-row')].map(r => r.innerText)
+    }))()`);
+    console.log('C state', JSON.stringify(sC, null, 1));
+    if (sC.search !== '') throw new Error('C: wrote into the global search box: ' + JSON.stringify(sC.search));
+    if (sC.stale !== 'do not touch') throw new Error('C: wrote into a pre-existing Concerns portal: ' + JSON.stringify(sC.stale));
+    if (sC.concernClicked) throw new Error('C: clicked a Concerns "Add finding" button');
+    if (sC.concernRated) throw new Error('C: clicked a Concerns rate button');
+    if (sC.concernsOpened) throw new Error('C: opened the Customer Concerns section');
+    if (sC.addConcernClicked) throw new Error('C: clicked Add Concern');
+    if (sC.concernMedia) throw new Error('C: clicked Add media');
+    if (sC.concernMenuClicked) throw new Error('C: clicked the Concerns listbox trap');
+    if (sC.concernEdit) throw new Error('C: clicked Concerns Edit');
+    if (!sC.rateAllUsed) throw new Error('C: Rate All Tasks was not used');
+    if (sC.rows.length !== SHARE_TASKS.length) throw new Error('C: row count ' + sC.rows.length);
+    for (const r of sC.rows) {
+      if (r.green !== 'true') throw new Error('C: not green: ' + r.task);
+      const want = ph.phraseFor(r.task).text;
+      if ((r.finding || '').trim() !== want) {
+        throw new Error('C: wording for ' + r.task + ': got ' + JSON.stringify(r.finding) + ' want ' + JSON.stringify(want));
+      }
+    }
+    const cBad = seen.filter(l => /search tekmetric|winter tires|summers in bags|add finding|add concern|client concern|customer concern/i.test(l || ''));
+    if (cBad.length) throw new Error('C: bad labels sent: ' + JSON.stringify(cBad));
+    console.log('NOFAULTS E2E C OK');
+
+    // ---------- Scenario D: no inspection card — do nothing ----------
+    seen.length = 0;
+    logs.length = 0;
+    await w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(htmlNoCard));
+    await new Promise(r => setTimeout(r, 150));
+    await run('fill-no-faults');
+    const sD = await w.webContents.executeJavaScript(`(() => ({
+      concernClicked: !!window.__concernClicked,
+      addConcernClicked: !!window.__addConcernClicked,
+      concernsOpened: !!window.__concernsOpened,
+      search: (document.getElementById('global-search') || {}).value || ''
+    }))()`);
+    console.log('D state', JSON.stringify(sD), 'logs', JSON.stringify(logs.filter(l => /card/i.test(l || ''))));
+    if (sD.concernClicked || sD.addConcernClicked || sD.concernsOpened) {
+      throw new Error('D: touched Concerns when no inspection card was present: ' + JSON.stringify(sD));
+    }
+    if (sD.search !== '') throw new Error('D: wrote into search: ' + JSON.stringify(sD.search));
+    if (!logs.some(l => /card not found/i.test(l || ''))) {
+      throw new Error('D: expected "card not found" log, got: ' + JSON.stringify(logs));
+    }
+    console.log('NOFAULTS E2E D OK');
+
     console.log('NOFAULTS E2E OK');
     app.exit(0);
   } catch (e) {

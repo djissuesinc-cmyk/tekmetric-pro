@@ -1,4 +1,4 @@
-TEKMETRIC PRO - FULL SOURCE BACKUP (version 2.4.2)
+TEKMETRIC PRO - FULL SOURCE BACKUP (version 2.4.3)
 ==================================================
 
 This zip has all of the app's source code and the GitHub build setup.
@@ -11,7 +11,7 @@ RESTORE OR SET UP ON A NEW PC
 
 RELEASE AN UPDATE TO ALL SHOP PCs
 1. Make your changes.
-2. Open package.json and raise "version" (for example 2.4.2 -> 2.4.3).
+2. Open package.json and raise "version" (for example 2.4.3 -> 2.4.4).
 3. GitHub Desktop: type a Summary > Commit to main > Push origin.
 4. GitHub builds the installer by itself (takes about 3 minutes, under the Actions tab).
 5. Every installed PC finds the update on startup and installs it when the app closes.
@@ -29,9 +29,11 @@ BUILD LOCALLY (optional, needs Node.js 20)
 LOGS
   %APPDATA%\tekmetric-pro-app\pdf-stamp.log   (or Help > Troubleshooting > Open PDF Log in the app)
 
-INSPECTION "NO FAULTS" WORDING (2.4.2)
-  Quick Actions > Fill "No Faults" (Ctrl+Alt+N) is scoped to the inspection card only
-  (it will not write into the top Search box or into Concerns). It rates every task
+INSPECTION "NO FAULTS" WORDING (2.4.3)
+  Quick Actions > Fill "No Faults" (Ctrl+Alt+N) is scoped to the inspection card only.
+  It will not click, focus, or type in Customer Concerns (Add Concern, concern rows)
+  or the top Search box. If the inspection card cannot be found, it does nothing.
+  It rates every task
   green via Rate All Tasks (including a MUI-style dropdown) or each row's green check,
   and writes item-specific wording in each empty Findings field, e.g.
   "No warning lights are illuminated on the dashboard."

@@ -75,8 +75,8 @@ ipcRenderer.on('settings-changed', (event, newSettings) => {
     toggleSidebarVisibility();
 });
 
-// v2.4.2: Fill "No Faults" — scoped to the inspection card, non-blocking, Rate All via
-// MUI mousedown + portal menu, Add Finding field detected via focus/new nodes/portals.
+// v2.4.3: Fill "No Faults" — hard allow-list on the inspection card. Never click, focus,
+// or write in Customer Concerns or the header. Rate All / Add finding stay in-card.
 const NF_GENERIC = 'No faults found at this time.';
 const NF_CLICK = 'button, a, [role="button"], [role="radio"], [role="menuitem"], [role="option"], [role="tab"], input[type="button"], input[type="radio"], input[type="checkbox"]';
 const NF_FIELD = 'textarea, input[type="text"], input[type="search"], input:not([type]), [contenteditable="true"], [contenteditable=""]';
@@ -95,6 +95,188 @@ let nfLogBuf = [];
 let nfLogTimer = null;
 let nfMaxSlice = 0;
 let nfSliceStart = 0;
+
+// ---- v2.4.3 allow-list: never click/focus/write outside the inspection card ----
+const NF_CONCERNS_MARK = /add\s*concern|client\s*concerns?|customer\s*concerns?/i;
+const NF_CONCERNS_HEAD = /^(add\s*concern|client\s*concerns?|customer\s*concerns?|concerns?)$/i;
+const NF_INSPECT_HDR = /\binspection task\b|30\s*point\s*(vehicle\s*)?inspection/i;
+const NF_RATE_ALL_RE = /rate all tasks/i;
+
+let nfActiveCard = null;
+let nfConcernsRoots = [];
+let nfAllowedPortals = new Set();
+
+function nfIsHeaderOrSearch(el) {
+    if (!el) return false;
+    if (nfIsSearchBox(el)) return true;
+    try { if (el.closest && el.closest('header, [role="banner"], [role="search"], nav')) return true; } catch (e) {}
+    return false;
+}
+
+function nfElementMarkText(el, max) {
+    if (!el) return '';
+    return [
+        nfOwnTextCheap(el, max || 48),
+        el.getAttribute && el.getAttribute('aria-label'),
+        el.getAttribute && el.getAttribute('title'),
+        el.getAttribute && el.getAttribute('placeholder')
+    ].join(' ').replace(/\s+/g, ' ').trim();
+}
+
+function nfScanMarks(root, pred, cap) {
+    const out = [];
+    if (!root || !root.querySelectorAll) return out;
+    let els;
+    try { els = root.querySelectorAll('h1,h2,h3,h4,h5,h6,[role="heading"],button,a,[role="button"],[role="link"],label'); } catch (e) { return out; }
+    const n = Math.min(els.length, cap || 250);
+    for (let i = 0; i < n; i++) {
+        try {
+            if (pred(nfElementMarkText(els[i], 48), els[i])) out.push(els[i]);
+        } catch (e) {}
+    }
+    return out;
+}
+
+function nfHasConcernsMarker(el) {
+    if (!el) return false;
+    return nfScanMarks(el, (t) => NF_CONCERNS_HEAD.test(t) || NF_CONCERNS_MARK.test(t), 250).length > 0;
+}
+
+function nfHasInspectHeader(el) {
+    if (!el) return false;
+    return nfFindText(el, NF_INSPECT_HDR, 3000).length > 0;
+}
+
+function nfHasRateAll(el) {
+    if (!el) return false;
+    if (nfFindText(el, NF_RATE_ALL_RE, 3000).length) return true;
+    return nfScanMarks(el, (t) => NF_RATE_ALL_RE.test(t), 250).length > 0;
+}
+
+function nfRefreshConcernsRoots() {
+    const marks = [];
+    try {
+        const heads = document.querySelectorAll('h1,h2,h3,h4,h5,h6,[role="heading"],button,a,[role="button"],[role="link"],label');
+        const cap = Math.min(heads.length, 400);
+        for (let i = 0; i < cap; i++) {
+            const t = nfElementMarkText(heads[i], 48);
+            if (NF_CONCERNS_HEAD.test(t) || NF_CONCERNS_MARK.test(t)) marks.push(heads[i]);
+        }
+    } catch (e) {}
+    try {
+        nfFindText(document.body, NF_CONCERNS_MARK, 4000).forEach(n => { if (n.parentElement) marks.push(n.parentElement); });
+    } catch (e) {}
+    const roots = [];
+    const seen = new Set();
+    for (const m of marks) {
+        let el = m;
+        let best = m;
+        for (let i = 0; i < 12 && el && el !== document.body && el !== document.documentElement; i++) {
+            // Stop before a shared parent that also holds Rate All / Inspection Task.
+            if (el !== m && (nfHasInspectHeader(el) || nfHasRateAll(el))) break;
+            best = el;
+            el = el.parentElement;
+        }
+        if (best && best !== document.body && best !== document.documentElement && !seen.has(best)) {
+            seen.add(best);
+            roots.push(best);
+        }
+    }
+    // Keep inner roots (the Concerns section, not a huge wrapper).
+    nfConcernsRoots = roots.filter(r => !roots.some(o => o !== r && r.contains(o)));
+    return nfConcernsRoots;
+}
+
+function nfInConcerns(el) {
+    if (!el) return false;
+    try {
+        for (const r of nfConcernsRoots) {
+            if (r && (r === el || (r.contains && r.contains(el)))) return true;
+        }
+    } catch (e) {}
+    // Fallback: only the element itself (or a heading/button ancestor) with its OWN
+    // short label. Do NOT use a large parent's concatenated text — that would mark
+    // every inspection control "in concerns" because the shared page also says
+    // "Customer Concerns".
+    try {
+        let n = el;
+        for (let i = 0; i < 8 && n && n !== document.body && n !== document.documentElement; i++) {
+            let isMark = false;
+            try { isMark = n.matches && n.matches('h1,h2,h3,h4,h5,h6,[role="heading"],button,a,[role="button"],[role="link"],label'); } catch (e) {}
+            if (isMark) {
+                const t = nfElementMarkText(n, 48);
+                if (NF_CONCERNS_HEAD.test(t) || NF_CONCERNS_MARK.test(t)) return true;
+            }
+            n = n.parentElement;
+        }
+    } catch (e) {}
+    return false;
+}
+
+function nfInAllowedPortal(el) {
+    if (!el || !nfAllowedPortals.size) return false;
+    try {
+        for (const p of nfAllowedPortals) {
+            if (p === el || (p.contains && p.contains(el))) return true;
+        }
+    } catch (e) {}
+    return false;
+}
+
+function nfDenyReason(el, opts) {
+    opts = opts || {};
+    if (!el) return 'no-target';
+    if (!nfActiveCard) return 'no inspection card';
+    if (nfIsHeaderOrSearch(el)) return 'header/search';
+    if (nfInConcerns(el)) return 'in concerns';
+    const inCard = (el === nfActiveCard || (nfActiveCard.contains && nfActiveCard.contains(el)));
+    if (inCard) return '';
+    if (opts.portal && nfInAllowedPortal(el)) return '';
+    return 'outside inspection card';
+}
+
+function nfIsAllowed(el, opts) {
+    return nfDenyReason(el, opts) === '';
+}
+
+function nfAllow(el, reason, opts) {
+    if (nfIsAllowed(el, opts)) return true;
+    nfLog('skip ' + (reason || 'action') + ': ' + nfDenyReason(el, opts) + ' ' + nfDescribe(el));
+    return false;
+}
+
+function nfSnapshotDom() {
+    const s = new Set();
+    try {
+        document.querySelectorAll(
+            NF_PORTAL_SEL + ',' + NF_MENU_SEL + ', [role="menuitem"], [role="option"], textarea, input, [contenteditable="true"], [contenteditable=""]'
+        ).forEach(el => s.add(el));
+    } catch (e) {}
+    return s;
+}
+
+function nfGrantNewPortals(before) {
+    const granted = [];
+    try {
+        document.querySelectorAll(NF_PORTAL_SEL + ',' + NF_MENU_SEL).forEach(el => {
+            if (before.has(el) || nfInConcerns(el)) return;
+            nfAllowedPortals.add(el);
+            granted.push(el);
+        });
+        document.querySelectorAll('textarea, input[type="text"], input:not([type]), [contenteditable="true"], [contenteditable=""]').forEach(el => {
+            if (before.has(el) || nfInConcerns(el) || nfIsSearchBox(el) || nfIsHeaderOrSearch(el)) return;
+            nfAllowedPortals.add(el);
+            granted.push(el);
+        });
+    } catch (e) {}
+    return granted;
+}
+
+function nfResetAllowList() {
+    nfActiveCard = null;
+    nfConcernsRoots = [];
+    nfAllowedPortals = new Set();
+}
 
 function nfSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -244,9 +426,11 @@ function nfIsSearchBox(el) {
 
 function nfIsConcernsRow(row) {
     if (!row) return false;
+    if (nfInConcerns(row)) return true;
     const t = nfOwnTextCheap(row, 160);
     // Live Concerns rows have "Add media" and "Edit" next to "Add finding". Inspection rows do not.
     if (/add\s*media/i.test(t)) return true;
+    if (/add\s*concern/i.test(t)) return true;
     try {
         // Only look at a tight neighbourhood (previous siblings / parent heading).
         // Do NOT querySelector a heading anywhere in body — that would match the
@@ -255,11 +439,11 @@ function nfIsConcernsRow(row) {
         for (let i = 0; i < 3 && el && el !== document.body && el !== document.documentElement; i++) {
             for (const c of el.children || []) {
                 if (/^H[1-6]$/.test(c.tagName) || (c.getAttribute && c.getAttribute('role') === 'heading')) {
-                    if (/^concerns?$|^customer concerns?$/i.test(nfOwnTextCheap(c, 40))) return true;
+                    if (NF_CONCERNS_HEAD.test(nfOwnTextCheap(c, 40))) return true;
                 }
             }
             const prev = el.previousElementSibling;
-            if (prev && /^concerns?$|^customer concerns?$/i.test(nfOwnTextCheap(prev, 40))) return true;
+            if (prev && NF_CONCERNS_HEAD.test(nfOwnTextCheap(prev, 40))) return true;
             el = el.parentElement;
         }
     } catch (e) {}
@@ -299,8 +483,9 @@ function nfVisibleFields(root) {
     return nfFields(root).filter(nfIsVisible);
 }
 
-async function nfPointer(el) {
-    if (!el) return;
+async function nfPointer(el, reason) {
+    if (!el) return false;
+    if (!nfAllow(el, reason || 'pointer', { portal: true })) return false;
     // Isolated-world dispatchEvent often does not reach page-world React/MUI listeners.
     // Run the pointer sequence in the page world, then also call native click().
     const mark = 'data-tekpro-nf-ptr';
@@ -332,6 +517,7 @@ async function nfPointer(el) {
         try { el.click(); } catch (e3) {}
     }
     nfSliceStart = performance.now();
+    return true;
 }
 
 function nfWait(fn, timeout, interval) {
@@ -539,36 +725,68 @@ function nfLooksLikeCard(el) {
 }
 
 function nfFindCard() {
-    const hits = nfFindText(document.body, NF_CARD_RE, 8000);
-    let best = null, bestSize = Infinity;
-    for (const tn of hits) {
-        let el = tn.parentElement;
-        for (let i = 0; i < 16 && el && el !== document.body; i++) {
-            if (nfLooksLikeCard(el)) {
-                let size = 0;
-                try { size = el.querySelectorAll('button, a, [role="button"]').length; } catch (e) { size = 9999; }
-                if (size < bestSize && size >= 4) { best = el; bestSize = size; }
+    nfRefreshConcernsRoots();
+    // Document-wide text search is only used to LOCATE the card, never as a click/write scope.
+    const starts = [];
+    try {
+        nfFindText(document.body, NF_RATE_ALL_RE, 5000).forEach(n => starts.push(n.parentElement || n));
+        nfFindText(document.body, NF_INSPECT_HDR, 5000).forEach(n => starts.push(n.parentElement || n));
+        nfScanMarks(document.body, (t) => NF_RATE_ALL_RE.test(t) || NF_INSPECT_HDR.test(t), 400).forEach(el => starts.push(el));
+    } catch (e) {}
+    let bestClean = null, cleanSize = Infinity;
+    let bestDirty = null, dirtySize = Infinity;
+    const consider = (el, dirty) => {
+        if (!el || el === document.body || el === document.documentElement) return;
+        let size = 0;
+        try { size = el.querySelectorAll('button, a, [role="button"]').length; } catch (e) { size = 99999; }
+        if (dirty) {
+            if (size < dirtySize && size >= 2) { bestDirty = el; dirtySize = size; }
+        } else if (size < cleanSize && size >= 2) { bestClean = el; cleanSize = size; }
+    };
+    const seen = new Set();
+    for (const start of starts) {
+        let el = start;
+        for (let i = 0; i < 16 && el && el !== document.body && el !== document.documentElement; i++) {
+            if (seen.has(el)) { el = el.parentElement; continue; }
+            seen.add(el);
+            const hasRate = nfHasRateAll(el);
+            const hasInsp = nfHasInspectHeader(el);
+            const hasConc = nfHasConcernsMarker(el);
+            // A usable root has the Inspection Task / 30 POINT header (Rate All may have been removed).
+            // Prefer a root that does NOT contain Add Concern / Customer / Client Concerns.
+            if (hasInsp && (hasRate || nfLooksLikeCard(el))) {
+                if (!hasConc) consider(el, false);
+                else { consider(el, true); break; }
+            } else if (hasConc && (hasInsp || hasRate)) {
+                consider(el, true);
                 break;
             }
             el = el.parentElement;
         }
     }
-    return best;
+    if (bestClean) return bestClean;
+    if (bestDirty) {
+        nfLog('card shares a parent with concerns; concerns region will be excluded html=' + JSON.stringify(nfHtmlSnippet(bestDirty, 200)));
+        return bestDirty;
+    }
+    return null;
 }
 
 function nfFindRows(card) {
-    const root = card || document.body;
+    if (!card) return [];
+    const root = card;
     const starts = [];
     // Only start from Add-finding controls and finding fields INSIDE the card.
-    // Never from the global search box or other page inputs.
+    // Never from the global search box, the header, or Concerns.
     try {
         const adds = root.querySelectorAll('a, button, [role="button"], [role="link"]');
         for (const el of adds) {
+            if (nfInConcerns(el) || nfIsHeaderOrSearch(el)) continue;
             if (/^add finding$/i.test(nfOwnTextCheap(el, 32))) starts.push(el);
         }
     } catch (e) {}
     nfFields(root).forEach(el => {
-        if (!nfIsSearchBox(el)) starts.push(el);
+        if (!nfIsSearchBox(el) && !nfInConcerns(el) && !nfIsHeaderOrSearch(el)) starts.push(el);
     });
     const rows = [];
     const seen = new Set();
@@ -576,8 +794,8 @@ function nfFindRows(card) {
         const row = nfClosestRow(s, card);
         if (!row) continue;
         if (seen.has(row)) continue;
-        if (nfIsConcernsRow(row)) continue;
-        if (card && !card.contains(row) && row !== card) continue;
+        if (nfIsConcernsRow(row) || nfInConcerns(row)) continue;
+        if (!(row === card || (card.contains && card.contains(row)))) continue;
         seen.add(row);
         rows.push(row);
     }
@@ -596,6 +814,7 @@ function nfLogRowChain(row, tag) {
 }
 
 async function nfSetValue(el, val) {
+    if (!nfAllow(el, 'write', { portal: true })) return false;
     try {
         if (nfIsContentEditable(el)) {
             el.focus();
@@ -606,7 +825,7 @@ async function nfSetValue(el, val) {
             await nfSleep(40);
             try { el.blur(); } catch (e) {}
             await nfSleep(40);
-            return;
+            return true;
         }
         const lastValue = el.value;
         const proto = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype;
@@ -620,8 +839,10 @@ async function nfSetValue(el, val) {
         await nfSleep(40);
         try { el.blur(); } catch (e) {}
         await nfSleep(40);
+        return true;
     } catch (e) {
         nfLog('set-value error: ' + (e && e.message));
+        return false;
     }
 }
 
@@ -649,9 +870,10 @@ function nfAssociatedControl(from) {
 }
 
 function nfFindRateAllControl(card) {
-    const root = card || document.body;
+    if (!card) return { control: null, info: { how: 'not-found' } };
+    const root = card;
     const info = { how: '', tag: '', role: '', text: '', aria: '', haspopup: '' };
-    // 1) Text "Rate All Tasks" anywhere in the card (or page, if no card).
+    // 1) Text "Rate All Tasks" only inside the inspection card — never document-wide.
     const hits = nfFindText(root, /rate all tasks/i, 6000);
     if (hits.length) {
         const node = hits[0];
@@ -664,7 +886,11 @@ function nfFindRateAllControl(card) {
             info.text = nfOwnTextCheap(control, 80) || nfOwnTextCheap(host, 80);
             info.aria = control.getAttribute('aria-label') || '';
             info.haspopup = control.getAttribute('aria-haspopup') || '';
-            return { control, info };
+            if (nfInConcerns(control) || nfIsHeaderOrSearch(control)) {
+                nfLog('rate-all: ignoring control in concerns/header ' + nfDescribe(control));
+            } else {
+                return { control, info };
+            }
         }
     }
     // 2) aria-label / placeholder / title on a compact set of controls
@@ -686,7 +912,12 @@ function nfFindRateAllControl(card) {
                 info.text = t.slice(0, 80);
                 info.aria = (control || el).getAttribute('aria-label') || '';
                 info.haspopup = (control || el).getAttribute('aria-haspopup') || '';
-                return { control: control || el, info };
+                const use = control || el;
+                if (nfInConcerns(use) || nfIsHeaderOrSearch(use)) {
+                    nfLog('rate-all: ignoring control in concerns/header ' + nfDescribe(use));
+                } else {
+                    return { control: use, info };
+                }
             }
         }
     } catch (e) {}
@@ -694,6 +925,7 @@ function nfFindRateAllControl(card) {
 }
 
 async function nfRateAllGreen(card) {
+    if (!card) return false;
     const found = nfFindRateAllControl(card);
     const control = found.control;
     nfLog('rate-all: ' + JSON.stringify(found.info) + (control ? ' desc=' + nfDescribe(control) : ''));
@@ -701,8 +933,9 @@ async function nfRateAllGreen(card) {
         nfLog('rate-all: control not found, will rate each row');
         return false;
     }
+    if (!nfAllow(control, 'rate-all')) return false;
     const sel = (control.tagName === 'SELECT' ? control : (control.closest && control.closest('select')));
-    if (sel && sel.options) {
+    if (sel && sel.options && nfIsAllowed(sel)) {
         const option = Array.from(sel.options).find(o => NF_GREEN_RE.test(o.text)) || Array.from(sel.options).find(o => /checked|okay|ok/i.test(o.text));
         if (option) {
             const last = sel.value;
@@ -716,23 +949,40 @@ async function nfRateAllGreen(card) {
         }
     }
     // MUI Select opens on mousedown (click alone is not enough). Full pointer sequence.
-    await nfPointer(control);
+    const before = nfSnapshotDom();
+    const clicked = await nfPointer(control, 'rate-all');
+    if (!clicked) return false;
     nfSliceStart = performance.now();
     const menu = await nfWait(() => {
         try {
-            const m = document.querySelector(NF_MENU_SEL);
-            if (m && !m.hidden && m.getAttribute('aria-hidden') !== 'true') return m;
+            nfGrantNewPortals(before);
+            // Prefer a menu inside the card (classic unhidden sibling) or a portal we just opened.
+            const cands = [];
+            try { card.querySelectorAll(NF_MENU_SEL).forEach(m => cands.push(m)); } catch (e) {}
+            try { document.querySelectorAll(NF_MENU_SEL).forEach(m => cands.push(m)); } catch (e) {}
+            for (const m of cands) {
+                if (!m || m.hidden || m.getAttribute('aria-hidden') === 'true') continue;
+                if (nfInConcerns(m)) continue;
+                const inCard = (m === card || card.contains(m));
+                const allowed = inCard || nfInAllowedPortal(m) || !before.has(m);
+                if (allowed) return m;
+            }
             const items = document.querySelectorAll('[role="menuitem"], [role="option"]');
             for (const it of items) {
-                const p = it.parentElement;
-                if (!p || p.hidden || p.getAttribute('aria-hidden') === 'true') continue;
-                if (p === control || (control && control.contains(p))) continue;
-                return p;
+                if (nfInConcerns(it)) continue;
+                const par = it.parentElement;
+                if (!par || par.hidden || par.getAttribute('aria-hidden') === 'true') continue;
+                if (par === control || (control && control.contains(par))) continue;
+                const inCard = (par === card || card.contains(par) || card.contains(it));
+                const allowed = inCard || nfInAllowedPortal(it) || nfInAllowedPortal(par) || !before.has(par);
+                if (allowed) return par;
             }
         } catch (e) {}
         return null;
     }, 600, 40);
     if (menu) {
+        nfGrantNewPortals(before);
+        if (!nfInAllowedPortal(menu) && !(menu === card || card.contains(menu))) nfAllowedPortals.add(menu);
         const options = Array.from(menu.querySelectorAll('[role="option"], [role="menuitem"], li, .MuiMenuItem-root'));
         const optInfo = options.slice(0, 8).map(o => ({
             text: nfOwnTextCheap(o, 60),
@@ -745,8 +995,8 @@ async function nfRateAllGreen(card) {
             chosen = options[0];
             nfLog('rate-all: no text match, taking first option');
         }
-        if (chosen) {
-            await nfPointer(chosen);
+        if (chosen && !nfInConcerns(chosen) && nfAllow(chosen, 'rate-all-option', { portal: true })) {
+            await nfPointer(chosen, 'rate-all-option');
             nfLog('rate-all: chose ' + JSON.stringify(nfOwnTextCheap(chosen, 60) || chosen.getAttribute('aria-label') || 'first'));
             await nfSleep(80);
             return true;
@@ -758,49 +1008,68 @@ async function nfRateAllGreen(card) {
 }
 
 async function nfRateRowGreen(row) {
+    if (!row || nfInConcerns(row) || nfIsConcernsRow(row)) return 'skipped-concerns';
     const clusters = nfRatingClusters(row);
     if (!clusters.length || clusters[0].many || !clusters[0].buttons) return 'no-ratings';
     const green = clusters[0].buttons[0];
     if (nfIsSelected(green)) return 'already-green';
-    await nfPointer(green);
+    if (!nfAllow(green, 'rate-row')) return 'blocked';
+    await nfPointer(green, 'rate-row');
     nfSliceStart = performance.now();
     return 'clicked';
 }
 
 async function nfOpenFinding(row, diagnose) {
+    if (!row || nfInConcerns(row) || nfIsConcernsRow(row)) {
+        if (diagnose) nfLog('add-finding: skipped concerns row');
+        return null;
+    }
     const existing = nfVisibleFields(row);
-    if (existing.length) return existing[0];
+    if (existing.length) {
+        const f = existing[0];
+        if (!nfIsAllowed(f, { portal: true })) {
+            if (diagnose) nfLog('add-finding: existing field not allowed ' + nfDescribe(f));
+            return null;
+        }
+        return f;
+    }
     const add = nfFindAddFinding(row);
     if (!add) {
         if (diagnose) nfLog('add-finding: no button in row html=' + JSON.stringify(nfHtmlSnippet(row, 300)));
         return null;
     }
-    const before = new Set(document.querySelectorAll('textarea, input[type="text"], input:not([type]), [contenteditable="true"], [contenteditable=""]'));
+    if (!nfAllow(add, 'add-finding')) return null;
+    const before = nfSnapshotDom();
     const prevActive = document.activeElement;
-    await nfPointer(add);
+    const clicked = await nfPointer(add, 'add-finding');
+    if (!clicked) return null;
     nfSliceStart = performance.now();
     const field = await nfWait(() => {
+        // Portals are allowed only if they appeared right after this in-card click.
+        nfGrantNewPortals(before);
         // 1) Whatever just received focus (portal editors typically focus the textarea).
         const ae = document.activeElement;
-        if (ae && ae !== prevActive && nfIsField(ae) && !nfIsSearchBox(ae)) return ae;
-        // 2) Newly added fields anywhere (MUI portals attach to document.body).
+        if (ae && ae !== prevActive && nfIsField(ae) && nfIsAllowed(ae, { portal: true })) return ae;
+        // 2) Newly added fields — only ones granted from this click, never a pre-existing Concerns editor.
         let now;
         try { now = document.querySelectorAll('textarea, input[type="text"], input:not([type]), [contenteditable="true"], [contenteditable=""]'); } catch (e) { now = []; }
         for (const f of now) {
-            if (!before.has(f) && nfIsField(f) && !nfIsSearchBox(f)) return f;
+            if (!before.has(f) && nfIsField(f) && nfIsAllowed(f, { portal: true })) return f;
         }
-        // 3) Visible field inside a popover / dialog / presentation portal.
+        // 3) Visible field inside a NEW popover / dialog — not a leftover Concerns portal.
         try {
             const portals = document.querySelectorAll(NF_PORTAL_SEL);
             for (const p of portals) {
+                if (before.has(p) && !nfInAllowedPortal(p)) continue;
+                if (nfInConcerns(p)) continue;
                 const vis = nfVisibleFields(p);
-                for (const f of vis) { if (!nfIsSearchBox(f)) return f; }
+                for (const f of vis) { if (nfIsAllowed(f, { portal: true })) return f; }
             }
         } catch (e) {}
-        // 4) A field that just appeared in the (possibly expanded) row or its parent.
+        // 4) A field that just appeared in the (possibly expanded) row — still must be allowed.
         const nearby = nfVisibleFields(row).concat(row.parentElement ? nfVisibleFields(row.parentElement) : []);
         for (const f of nearby) {
-            if (!before.has(f) && !nfIsSearchBox(f)) return f;
+            if (!before.has(f) && nfIsAllowed(f, { portal: true })) return f;
         }
         return null;
     }, 500, 40);
@@ -809,11 +1078,15 @@ async function nfOpenFinding(row, diagnose) {
         let newDesc = [];
         try {
             document.querySelectorAll('textarea, input[type="text"], [contenteditable="true"]').forEach(f => {
-                if (!before.has(f)) newDesc.push(nfDescribe(f) + ' vis=' + nfIsVisible(f));
+                if (!before.has(f)) newDesc.push(nfDescribe(f) + ' vis=' + nfIsVisible(f) + ' allowed=' + nfIsAllowed(f, { portal: true }));
             });
         } catch (e) {}
         nfLog('add-finding: no field after click. active=' + nfDescribe(ae) + ' new=' + JSON.stringify(newDesc).slice(0, 300)
             + ' portal=' + JSON.stringify(nfHtmlSnippet(document.querySelector(NF_PORTAL_SEL), 300)));
+    }
+    if (field && !nfIsAllowed(field, { portal: true })) {
+        nfLog('add-finding: rejected field ' + nfDescribe(field));
+        return null;
     }
     return field || null;
 }
@@ -840,8 +1113,14 @@ async function fillNoFaults() {
     try {
         await nfLoadBook();
         nfLog('fill start url=' + String(location.href || '').slice(0, 180));
+        nfResetAllowList();
         const card = nfFindCard();
-        nfLog('card=' + (card ? nfDescribe(card) : 'NOT FOUND') + (card ? ' html=' + JSON.stringify(nfHtmlSnippet(card, 200)) : ''));
+        if (!card) {
+            nfLog('card not found ' + JSON.stringify(nfHtmlSnippet(document.body, 300)));
+            return;
+        }
+        nfActiveCard = card;
+        nfLog('card=' + nfDescribe(card) + ' html=' + JSON.stringify(nfHtmlSnippet(card, 200)));
         const ratedAll = await nfRateAllGreen(card);
         nfSliceStart = performance.now();
         await nfYield();
@@ -866,6 +1145,11 @@ async function fillNoFaults() {
             if (performance.now() > deadline) { nfLog('fill timeout at row ' + i); break; }
             await nfYield();
             const row = rows[i];
+            if (nfInConcerns(row) || nfIsConcernsRow(row) || !(row === card || card.contains(row))) {
+                nfLog('fill #' + i + ' skip row outside inspection card');
+                failed++;
+                continue;
+            }
             if (!ratedAll) {
                 const r = await nfRateRowGreen(row);
                 nfSliceStart = performance.now();
@@ -899,7 +1183,8 @@ async function fillNoFaults() {
                     if (again && again[0]) use = again[0];
                 } catch (e) {}
             }
-            await nfSetValue(field, use);
+            const wrote = await nfSetValue(field, use);
+            if (!wrote) { failed++; continue; }
             nfLog('fill #' + i + ' wrote label=' + JSON.stringify(label) + ' chars=' + use.length + ' into=' + nfDescribe(field));
             filled++;
             // Close a leftover portal so the next row starts clean.
@@ -911,6 +1196,7 @@ async function fillNoFaults() {
             await nfYield();
             const again = nfFindRows(card);
             for (const row of again) {
+                if (nfInConcerns(row) || nfIsConcernsRow(row) || !(row === card || card.contains(row))) continue;
                 if (rows.includes(row)) {
                     const vis = nfVisibleFields(row)[0];
                     if (!vis || nfFieldValue(vis)) continue; // no empty visible field left to fill
@@ -929,7 +1215,8 @@ async function fillNoFaults() {
                     const got = await nfInvoke({ action: 'fill', labels: [label], snippets: [nfStripNoise(nfCellText(row)).slice(0, 160)] });
                     if (got && got[0]) use = got[0];
                 } catch (e) {}
-                await nfSetValue(field, use);
+                const wrote = await nfSetValue(field, use);
+                if (!wrote) continue;
                 filled++;
                 nfLog('fill extra wrote label=' + JSON.stringify(label) + ' into=' + nfDescribe(field));
                 try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); } catch (e) {}
@@ -947,6 +1234,7 @@ async function fillNoFaults() {
         } catch (e) {}
         nfResumeWorld();
         nfLogFlush();
+        nfResetAllowList();
         nfBusy = false;
     }
 }
@@ -960,8 +1248,14 @@ async function clearNoFaults() {
     try {
         await nfLoadBook();
         nfLog('clear start');
+        nfResetAllowList();
         const card = nfFindCard();
-        const fields = nfFields(card || document).filter(f => nfFieldValue(f) && !nfIsSearchBox(f));
+        if (!card) {
+            nfLog('card not found ' + JSON.stringify(nfHtmlSnippet(document.body, 300)));
+            return;
+        }
+        nfActiveCard = card;
+        const fields = nfFields(card).filter(f => nfFieldValue(f) && !nfIsSearchBox(f) && nfIsAllowed(f, { portal: true }) && !nfInConcerns(f));
         if (!fields.length) { nfLog('clear: no filled fields'); return; }
         let flags = null;
         try { flags = await nfInvoke({ action: 'clear', values: fields.map(f => nfFieldValue(f)) }); } catch (e) {}
@@ -981,6 +1275,7 @@ async function clearNoFaults() {
         try { document.documentElement.dataset.tekproNf = 'done'; } catch (e) {}
         nfResumeWorld();
         nfLogFlush();
+        nfResetAllowList();
         nfBusy = false;
     }
 }
