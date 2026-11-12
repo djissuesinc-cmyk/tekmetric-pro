@@ -388,7 +388,7 @@ function handleInspectionPhrases(req) {
     if (req.action === 'clear') return (req.values || []).map(v => inspectionPhrases.isGeneratedPhrase(v));
     if (req.action === 'book') {
         const sentences = inspectionPhrases.RULES.map(r => r.text).concat(inspectionPhrases.LEGACY || []).concat([inspectionPhrases.GENERIC]);
-        return { generic: inspectionPhrases.GENERIC, sentences };
+        return { generic: inspectionPhrases.GENERIC, sentences, names: inspectionPhrases.RULES.map(r => r.name) };
     }
     if (req.action === 'log') {
         pdfLog(String(req.message || ''));

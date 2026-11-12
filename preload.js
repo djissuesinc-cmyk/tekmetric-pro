@@ -75,10 +75,10 @@ ipcRenderer.on('settings-changed', (event, newSettings) => {
     toggleSidebarVisibility();
 });
 
-// v2.4.4: Fill "No Faults" — find finding fields the 2.3.9/2.4.0 way (querySelectorAll
-// textarea + forceNativeInput with Enter to commit). Labels from the row (2.4.1 climb +
-// glued "Add finding" cleanup), item-specific wording, Rate All Tasks (2.4.3, works live),
-// skip Concerns / header search. No card-root gate (that produced rows=0 on the live page).
+// v2.4.5: Fill "No Faults" — every textarea/input/contenteditable with placeholder
+// "Enter finding" is an inspection finding box. No row/rating-cluster gate.
+// Skip Concerns and header search only. Rate All Tasks unchanged (works live).
+// Write with forceNativeInput (no Enter). "Add findings" opens a box if needed.
 const NF_GENERIC = 'No faults found at this time.';
 const NF_CLICK = 'button, a, [role="button"], [role="radio"], [role="menuitem"], [role="option"], [role="tab"], input[type="button"], input[type="radio"], input[type="checkbox"]';
 const NF_FIELD = 'textarea, input[type="text"], input[type="search"], input:not([type]), [contenteditable="true"], [contenteditable=""]';
@@ -321,7 +321,7 @@ async function nfLoadBook() {
     const b = await nfInvoke({ action: 'book' });
     const sentences = new Set(((b && b.sentences) || []).map(nfNorm));
     sentences.add(nfNorm(NF_GENERIC));
-    nfBook = { generic: nfNorm((b && b.generic) || NF_GENERIC), sentences };
+    nfBook = { generic: nfNorm((b && b.generic) || NF_GENERIC), sentences, names: (b && b.names) || [] };
     return nfBook;
 }
 
@@ -1155,11 +1155,182 @@ function nfResumeWorld() {
     try { if (typeof observer !== 'undefined' && observer && document.body) observer.observe(document.body, { childList: true, subtree: true }); } catch (e) {}
 }
 
-async function nfCommit(el, val) {
-    // 2.3.9 / 2.4.0 commit: native value setter, input + change, Enter, then blur.
+function nfIsEnterFinding(el) {
     if (!el) return false;
-    if (nfIsHeaderOrSearch(el) || nfIsSearchBox(el) || nfInConcerns(el)) {
-        nfLog('skip write: ' + nfDenyReason(el, {}) + ' ' + nfDescribe(el));
+    try {
+        const ph = [
+            el.getAttribute && el.getAttribute('placeholder'),
+            el.getAttribute && el.getAttribute('aria-placeholder'),
+            el.getAttribute && el.getAttribute('data-placeholder')
+        ].join(' ');
+        return /enter\s*finding/i.test(ph);
+    } catch (e) { return false; }
+}
+
+function nfDirectOwnText(el, max) {
+    if (!el || !el.childNodes) return '';
+    let s = '';
+    const cap = max || 80;
+    for (let i = 0; i < el.childNodes.length && s.length < cap; i++) {
+        const n = el.childNodes[i];
+        if (n.nodeType === 3) s += n.nodeValue;
+    }
+    return s.replace(/\s+/g, ' ').trim();
+}
+
+
+function nfRowLooksLikeConcernsMedia(n) {
+    if (!n || n === document.body || n === document.documentElement) return false;
+    try { if (nfHasRateAll(n) || nfHasInspectHeader(n)) return false; } catch (e) {}
+    try {
+        let k = 0;
+        const fs = n.querySelectorAll('textarea, input, [contenteditable="true"], [contenteditable=""]');
+        for (let i = 0; i < fs.length && k < 3; i++) {
+            if (nfIsEnterFinding(fs[i])) k++;
+        }
+        if (k > 1) return false;
+    } catch (e) {}
+    try {
+        const buttons = n.querySelectorAll('button, a, [role="button"], [role="link"]');
+        const cap = Math.min(buttons.length, 24);
+        // A sheet wrapper has many buttons; a concern row has a handful.
+        if (buttons.length > 24) return false;
+        for (let i = 0; i < cap; i++) {
+            if (/add\s*media/i.test(nfElementMarkText(buttons[i], 40))) return true;
+        }
+    } catch (e) {}
+    return false;
+}
+
+function nfFindingInConcerns(el) {
+    if (!el) return false;
+    try { if (nfInConcerns(el)) return true; } catch (e) {}
+    try {
+        let n = el;
+        for (let i = 0; i < 8 && n && n !== document.body && n !== document.documentElement; i++) {
+            const own = nfDirectOwnText(n, 80);
+            if (/add\s*concern|customer\s*concerns?|client\s*concerns?/i.test(own)) return true;
+            let isMark = false;
+            try { isMark = n.matches && n.matches('h1,h2,h3,h4,h5,h6,[role="heading"],button,a,[role="button"],[role="link"],label'); } catch (e) {}
+            if (isMark && /add\s*concern|customer\s*concerns?|client\s*concerns?/i.test(nfElementMarkText(n, 48))) return true;
+            // "Add media" marks a Concerns *row*, not a shared page wrapper
+            // that also holds the inspection sheet (that wrapper's cheap text
+            // includes the Concerns section's "Add media" button).
+            if (nfRowLooksLikeConcernsMedia(n)) return true;
+            n = n.parentElement;
+        }
+    } catch (e) {}
+    return false;
+}
+
+function nfNormName(s) {
+    return String(s || '').toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function nfFuzzyKnownTask(line) {
+    const n = nfNormName(line);
+    if (!n || n.length < 3) return null;
+    const names = (nfBook && nfBook.names) || [];
+    // Exact first (normalized).
+    for (const name of names) {
+        if (n === nfNormName(name)) return name;
+    }
+    // The line contains a known task name, or vice versa for short names (HORN).
+    let best = null, bestLen = 0;
+    for (const name of names) {
+        const rn = nfNormName(name);
+        if (!rn) continue;
+        if (n.includes(rn) && rn.length > bestLen) { best = name; bestLen = rn.length; }
+        else if (rn.includes(n) && n.length >= 4 && n.length > bestLen) { best = name; bestLen = n.length; }
+        else {
+            const words = rn.split(' ').filter(w => w.length > 2);
+            if (words.length && words.every(w => n.includes(w)) && rn.length > bestLen) { best = name; bestLen = rn.length; }
+        }
+    }
+    return best;
+}
+
+const NF_LABEL_NOISE = /^(interior|exterior|under hood|starting\/?charging(\s+system)?|steering and suspension|brakes|under vehicle|fluid leaks\s*\(\s*general\s*\)|other faults not listed|30 point vehicle inspection|rate all tasks|all edits will be auto-saved|inspection task|findings?|rating|done|notes?|comments?|good|fair|poor|ok|pass|fail|n\/a|na|none|save|cancel|edit|delete)$/i;
+
+function nfCleanFindingLine(s) {
+    let t = String(s || '')
+        .replace(/add\s*findings?/ig, ' ')
+        .replace(/add\s*media/ig, ' ')
+        .replace(/\bedit\b/ig, ' ')
+        .replace(/enter\s*finding/ig, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/[:*\u2022\-–—\s]+$/, '');
+    if (t.length < 2 || t.length > 120 || !/[a-z]/i.test(t)) return '';
+    if (NF_LABEL_NOISE.test(t)) return '';
+    if (/^search\b/i.test(t)) return '';
+    return t;
+}
+
+function nfFindingLabelText(el, field, fieldVal) {
+    if (!el) return '';
+    // Build text from the ancestor, excluding the field itself and button/control labels.
+    let raw = '';
+    const skip = 'button, textarea, input, select, svg, script, style, img, [role="button"], [role="radio"], [role="menuitem"], [contenteditable], [contenteditable="true"]';
+    const walk = (n, depth) => {
+        if (!n || depth > 14 || raw.length > 400) return;
+        if (n === field) return;
+        if (n.nodeType === 3) { raw += n.nodeValue + '\n'; return; }
+        if (n.nodeType !== 1) return;
+        try { if (n.matches && n.matches(skip)) return; } catch (e) {}
+        for (const c of n.childNodes) walk(c, depth + 1);
+        raw += '\n';
+    };
+    try { walk(el, 0); } catch (e) {
+        try { raw = (el.innerText || el.textContent || ''); } catch (e2) { raw = ''; }
+    }
+    if (fieldVal) raw = raw.split(fieldVal).join(' ');
+    return raw;
+}
+
+function nfFindingLabel(ta, rowHint) {
+    const val = ta ? nfFieldValue(ta) : '';
+    const tryText = (raw) => {
+        const lines = String(raw || '').split(/\n+/).map(nfCleanFindingLine).filter(Boolean);
+        if (!lines.length) return '';
+        for (const line of lines) {
+            if (nfFuzzyKnownTask(line)) return line;
+        }
+        return lines[0];
+    };
+    if (rowHint) {
+        const got = tryText(nfFindingLabelText(rowHint, ta, val));
+        if (got) return got;
+    }
+    let el = ta && ta.parentElement;
+    for (let i = 0; i < 10 && el && el !== document.body && el !== document.documentElement; i++) {
+        const got = tryText(nfFindingLabelText(el, ta, val));
+        if (got) return got;
+        el = el.parentElement;
+    }
+    try { return getInspectionLabel(ta, rowHint) || ''; } catch (e) { return ''; }
+}
+
+function nfAncestorChainSnippet(el, n) {
+    const parts = [];
+    let p = el;
+    for (let i = 0; i < 8 && p && p !== document.documentElement; i++) {
+        parts.push(nfDescribe(p));
+        p = p.parentElement;
+    }
+    return parts.join(' > ').replace(/\s+/g, ' ').slice(0, n || 200);
+}
+
+function nfCommit(el, val) {
+    // Native setter + input + change + blur. Do NOT send Enter — on a textarea
+    // Enter may insert a newline or submit the form.
+    if (!el) return false;
+    if (nfIsHeaderOrSearch(el) || nfIsSearchBox(el) || nfFindingInConcerns(el)) {
+        nfLog('skip write: concerns/search ' + nfDescribe(el));
+        return false;
+    }
+    if (!nfIsEnterFinding(el) && !nfIsContentEditable(el)) {
+        nfLog('skip write: not an Enter-finding field ' + nfDescribe(el));
         return false;
     }
     try {
@@ -1170,10 +1341,23 @@ async function nfCommit(el, val) {
             catch (e) { el.dispatchEvent(new Event('input', { bubbles: true, composed: true })); }
             el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
             try { el.blur(); } catch (e) {}
-            return true;
+        } else {
+            const lastValue = el.value;
+            const proto = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype;
+            const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+            const setter = desc && desc.set;
+            try { el.focus(); } catch (e) {}
+            if (setter) setter.call(el, val); else el.value = val;
+            if (el._valueTracker) el._valueTracker.setValue(lastValue);
+            el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+            try { el.blur(); } catch (e) {}
         }
-        forceNativeInput(el, val);
-        return true;
+        const got = nfFieldValue(el);
+        const ok = nfNorm(got) === nfNorm(val);
+        if (!ok) nfLog('commit mismatch want=' + JSON.stringify(val).slice(0, 80) + ' got=' + JSON.stringify(got).slice(0, 80) + ' into=' + nfDescribe(el));
+        else nfLog('commit ok chars=' + String(val || '').length + ' into=' + nfDescribe(el));
+        return ok;
     } catch (e) {
         nfLog('commit error: ' + (e && e.message));
         return false;
@@ -1181,14 +1365,13 @@ async function nfCommit(el, val) {
 }
 
 function nfCollectFindingFields() {
-    // 2.3.9 / 2.4.0: the live sheet already has a <textarea> per inspection task.
-    // That query found all 23 fields (2.4.0 log). We also pick up contenteditable
-    // (used in tests) and then skip Concerns / header / search.
+    // Live signature: placeholder "Enter finding". The 2.4.4 log found all 23
+    // inspection textareas this way, then skipped them on a row-cluster gate.
+    // Do not require a detected row. Never take a placeholder-less box.
     const raw = [];
     const seen = new Set();
-    const push = (el) => { if (el && !seen.has(el)) { seen.add(el); raw.push(el); } };
-    try { document.querySelectorAll('textarea').forEach(push); } catch (e) {}
-    try { document.querySelectorAll('[contenteditable="true"], [contenteditable=""]').forEach(push); } catch (e) {}
+    const push = (el) => { if (el && !seen.has(el) && nfIsEnterFinding(el)) { seen.add(el); raw.push(el); } };
+    try { document.querySelectorAll('textarea, input[type="text"], input:not([type]), [contenteditable="true"], [contenteditable=""]').forEach(push); } catch (e) {}
     const out = [];
     for (const el of raw) {
         if (el.disabled || el.readOnly) continue;
@@ -1196,14 +1379,8 @@ function nfCollectFindingFields() {
             nfLog('skip field header/search ' + nfDescribe(el));
             continue;
         }
-        if (nfInConcerns(el)) {
+        if (nfFindingInConcerns(el)) {
             nfLog('skip field in concerns ' + nfDescribe(el));
-            continue;
-        }
-        // Leftover portals / random page boxes that aren't on an inspection row.
-        // (Fields we open via Add finding are added by the caller, with the row remembered.)
-        if (!nfClosestRow(el)) {
-            nfLog('skip field with no inspection row ' + nfDescribe(el));
             continue;
         }
         out.push(el);
@@ -1216,12 +1393,72 @@ function nfCollectAddFindingButtons() {
     try {
         const els = document.querySelectorAll('a, button, [role="button"], [role="link"]');
         for (const el of els) {
-            if (!/^add finding$/i.test(nfOwnTextCheap(el, 32))) continue;
-            if (nfInConcerns(el) || nfIsHeaderOrSearch(el)) continue;
+            const t = nfOwnTextCheap(el, 40);
+            if (!/add\s*findings?/i.test(t) || t.length > 40) continue;
+            if (nfFindingInConcerns(el) || nfIsHeaderOrSearch(el)) continue;
+            // Skip only if THIS item already has an Enter-finding box. Stop climbing
+            // once the ancestor is a multi-item wrapper (other tasks' boxes live there).
+            let scope = el.parentElement;
+            let has = false;
+            for (let i = 0; i < 6 && scope && scope !== document.body; i++) {
+                let fs = [];
+                let adds = 0;
+                try {
+                    fs = [...scope.querySelectorAll('textarea, input, [contenteditable="true"], [contenteditable=""]')]
+                        .filter(f => nfIsEnterFinding(f) && !nfFindingInConcerns(f));
+                    for (const b of scope.querySelectorAll('a, button, [role="button"], [role="link"]')) {
+                        const bt = nfOwnTextCheap(b, 40);
+                        if (/add\s*findings?/i.test(bt) && bt.length <= 40) adds++;
+                    }
+                } catch (e) {}
+                if (fs.length > 1 || adds > 1) break;
+                if (fs.length === 1) { has = true; break; }
+                scope = scope.parentElement;
+            }
+            if (has) continue;
             out.push(el);
         }
     } catch (e) {}
     return out;
+}
+
+async function nfOpenEnterFinding(add) {
+    if (!add || !nfAllow(add, 'add-finding')) return null;
+    const before = new Set();
+    try {
+        document.querySelectorAll('textarea, input[type="text"], input:not([type]), [contenteditable="true"], [contenteditable=""]').forEach(f => {
+            if (nfIsEnterFinding(f)) before.add(f);
+        });
+    } catch (e) {}
+    let scope = add.parentElement;
+    for (let i = 0; i < 8 && scope && scope.parentElement && scope.parentElement !== document.body; i++) {
+        scope = scope.parentElement;
+    }
+    const prevActive = document.activeElement;
+    const clicked = await nfPointer(add, 'add-finding');
+    if (!clicked) return null;
+    nfSliceStart = performance.now();
+    const field = await nfWait(() => {
+        nfGrantNewPortals(before);
+        const cands = [];
+        try {
+            document.querySelectorAll('textarea, input[type="text"], input:not([type]), [contenteditable="true"], [contenteditable=""]').forEach(f => {
+                if (!nfIsEnterFinding(f) || nfFindingInConcerns(f) || nfIsSearchBox(f)) return;
+                cands.push(f);
+            });
+        } catch (e) {}
+        // Prefer a NEW box inside the clicked button's ancestor.
+        for (const f of cands) {
+            if (!before.has(f) && scope && scope.contains(f)) return f;
+        }
+        for (const f of cands) {
+            if (!before.has(f)) return f;
+        }
+        const ae = document.activeElement;
+        if (ae && ae !== prevActive && nfIsEnterFinding(ae) && !nfFindingInConcerns(ae)) return ae;
+        return null;
+    }, 400, 40);
+    return field || null;
 }
 
 async function fillNoFaults() {
@@ -1262,35 +1499,39 @@ async function fillNoFaults() {
         }
         nfLog('fill fields=' + fields.length + (fields[0] ? (' first=' + nfDescribe(fields[0]) + ' row=' + JSON.stringify(nfHtmlSnippet(fieldRow.get(fields[0]) || fields[0].parentElement, 300))) : ''));
 
-        // Secondary: "Add finding" only for inspection rows that still have no field.
-        // The findings box may open in a body portal — remember the row we clicked so the label still resolves.
+        // Secondary: "Add findings" on rows that still have no Enter-finding box.
         const adds = nfCollectAddFindingButtons();
+        nfLog('fill add-finding buttons=' + adds.length);
         for (const add of adds) {
             if (performance.now() > deadline) break;
-            const row = nfClosestRow(add) || add.parentElement;
-            if (row && (nfInConcerns(row) || nfIsConcernsRow(row))) continue;
-            if (row && fields.some(f => fieldRow.get(f) === row || (row.contains && row.contains(f)))) continue;
-            const opened = await nfOpenFinding(row || add, fields.length === 0);
-            if (opened && !fields.includes(opened) && !nfInConcerns(opened) && !nfIsSearchBox(opened)) {
+            if (nfFindingInConcerns(add)) continue;
+            const row = add.parentElement;
+            const opened = await nfOpenEnterFinding(add);
+            if (opened && !fields.includes(opened) && !nfFindingInConcerns(opened)) {
                 fields.push(opened);
                 if (row) fieldRow.set(opened, row);
-                nfLog('fill opened add-finding into=' + nfDescribe(opened) + ' label-row=' + JSON.stringify(getInspectionLabel(opened, row)) + ' after=' + JSON.stringify(nfHtmlSnippet(opened, 200)));
+                nfLog('fill opened add-finding into=' + nfDescribe(opened) + ' label=' + JSON.stringify(nfFindingLabel(opened, row)) + ' after=' + JSON.stringify(nfHtmlSnippet(opened, 200)));
             }
         }
         nfLog('fill fields after add-finding=' + fields.length + ' rateAll=' + ratedAll);
 
         if (!fields.length) {
-            nfLog('fill: no finding fields (none of the 2.3.9 textarea query, and no Add finding opened one)');
+            nfLog('fill: no Enter-finding fields');
             return;
         }
         if (fields[0]) nfLogRowChain(nfClosestRow(fields[0]) || fields[0].parentElement, 'first-row');
 
         const labels = [];
         const snippets = [];
-        for (const field of fields) {
-            const row = fieldRow.get(field) || nfClosestRow(field);
-            labels.push(getInspectionLabel(field, row));
-            snippets.push(nfStripNoise(nfCellText(row || field, field)).slice(0, 160));
+        for (let i = 0; i < fields.length; i++) {
+            const field = fields[i];
+            const row = fieldRow.get(field) || field.parentElement;
+            const label = nfFindingLabel(field, row);
+            labels.push(label);
+            snippets.push(nfFindingLabelText(row || field.parentElement, field, nfFieldValue(field)).replace(/\s+/g, ' ').slice(0, 160));
+            if (i < 3) {
+                nfLog('fill label #' + i + ' ' + JSON.stringify(label) + ' chain=' + JSON.stringify(nfAncestorChainSnippet(field, 200)));
+            }
         }
         let texts = null;
         try { texts = await nfInvoke({ action: 'fill', labels, snippets }); } catch (e) {}
@@ -1300,13 +1541,13 @@ async function fillNoFaults() {
             if (performance.now() > deadline) { nfLog('fill timeout at field ' + i); break; }
             await nfYield();
             const field = fields[i];
-            if (nfInConcerns(field) || nfIsSearchBox(field) || nfIsHeaderOrSearch(field)) {
+            if (nfFindingInConcerns(field) || nfIsSearchBox(field) || nfIsHeaderOrSearch(field)) {
                 nfLog('fill #' + i + ' skip concerns/search ' + nfDescribe(field));
                 failed++;
                 continue;
             }
-            const row = fieldRow.get(field) || nfClosestRow(field);
-            if (!ratedAll && row && !nfInConcerns(row)) {
+            const row = fieldRow.get(field) || field.parentElement;
+            if (!ratedAll && row && !nfFindingInConcerns(row)) {
                 const r = await nfRateRowGreen(row);
                 nfSliceStart = performance.now();
                 if (r !== 'already-green') nfLog('fill #' + i + ' rate-row=' + r);
@@ -1317,7 +1558,7 @@ async function fillNoFaults() {
                 skipped++;
                 continue;
             }
-            let label = labels[i] || getInspectionLabel(field, row);
+            let label = labels[i] || nfFindingLabel(field, row);
             if (label) labels[i] = label;
             if (!label) nfLog('fill #' + i + ' label="" row=' + JSON.stringify(snippets[i]));
             let use = (texts && texts[i]) || NF_GENERIC;

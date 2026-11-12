@@ -165,7 +165,7 @@ function norm(s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim()
 function cleanLabel(label) {
     let s = String(label == null ? '' : label).replace(/\s+/g, ' ').trim();
     // Live Tekmetric concatenates the "Add finding" control onto the task name ("HORNAdd finding").
-    s = s.replace(/add\s*finding/ig, ' ').replace(/add\s*media/ig, ' ');
+    s = s.replace(/add\s*findings?/ig, ' ').replace(/add\s*media/ig, ' ');
     s = s.replace(/\s+/g, ' ').trim();
     s = s.replace(/[:*\u2022\-–—\s]+$/, '').replace(/^[\d.)\s\-–—\u2022]+(?=[a-z])/i, '').trim();
     return s;

@@ -1,4 +1,4 @@
-// v2.4.4 Electron e2e: Fill "No Faults" on a mock inspection page, including a
+// v2.4.5 Electron e2e: Fill "No Faults" on a mock inspection page, including a
 // live-Tekmetric layout (MUI Select via mousedown + portal menu, ratings in a
 // sibling cell, Add finding opening a portal, global search + concerns that
 // must not be touched), a heavy 5000-node page with no long task > 200ms, a
@@ -21,7 +21,7 @@ function phrasesIpc(req) {
   if (req.action === 'fill') { seen.push(...(req.labels || [])); return (req.labels || []).map(l => ph.phraseFor(l).text); }
   if (req.action === 'clear') return (req.values || []).map(v => ph.isGeneratedPhrase(v));
   if (req.action === 'book') {
-    return { generic: ph.GENERIC, sentences: ph.RULES.map(r => r.text).concat(ph.LEGACY || []).concat([ph.GENERIC]) };
+    return { generic: ph.GENERIC, sentences: ph.RULES.map(r => r.text).concat(ph.LEGACY || []).concat([ph.GENERIC]), names: ph.RULES.map(r => r.name) };
   }
   if (req.action === 'log') { logs.push(req.message); return true; }
   return null;
@@ -60,11 +60,11 @@ function rowHtml(name, i) {
   const id = 't' + i;
   const mode = MODE[name] || 'ta';
   let findings;
-  if (mode === 'add') findings = `<button type="button" class="add-finding" data-id="${id}">Add Finding</button>`;
-  else if (mode === 'ce') findings = `<div contenteditable="true" id="${id}"></div>`;
-  else if (mode === 'user') findings = `<textarea id="${id}">PADS AT 3MM</textarea>`;
-  else if (mode === 'generic') findings = `<textarea id="${id}">${ph.GENERIC}</textarea>`;
-  else findings = `<textarea id="${id}"></textarea>`;
+  if (mode === 'add') findings = `<button type="button" class="add-finding" data-id="${id}">Add findings</button>`;
+  else if (mode === 'ce') findings = `<div contenteditable="true" id="${id}" placeholder="Enter finding" aria-placeholder="Enter finding"></div>`;
+  else if (mode === 'user') findings = `<textarea id="${id}" class="block border-0 py-2 outline-none" placeholder="Enter finding">PADS AT 3MM</textarea>`;
+  else if (mode === 'generic') findings = `<textarea id="${id}" class="block border-0 py-2 outline-none" placeholder="Enter finding">${ph.GENERIC}</textarea>`;
+  else findings = `<textarea id="${id}" class="block border-0 py-2 outline-none" placeholder="Enter finding"></textarea>`;
   const section = SECTIONS[name] ? `<div class="section-head">${SECTIONS[name]}</div>` : '';
   return `${section}
   <div class="insp-row" data-task="${name}">
@@ -121,6 +121,8 @@ document.addEventListener('click', (e) => {
   if (add) {
     const ta = document.createElement('textarea');
     if (add.dataset.id) ta.id = add.dataset.id;
+    ta.className = 'block border-0 py-2 outline-none';
+    ta.placeholder = 'Enter finding';
     add.replaceWith(ta);
     ta.focus();
     return;
@@ -147,26 +149,15 @@ const LIVE_TASKS = [
   'TIE RODS', 'FLUID LEAKS', 'OTHER FAULTS FOUND',
 ];
 function liveRow(name) {
-  // Live page: each inspection task already has a <textarea> (2.4.0 found all 23).
-  // HORN stays "Add finding" so the fallback path is still tested.
+  // Live 2.4.4/2.4.5: flat item (no rating-cluster row wrapper). Most tasks already
+  // have textarea.block.border-0.py-2.outline-none placeholder "Enter finding".
+  // Empty rows show "Add findings"; a plain placeholder-less textarea must not be filled.
   const finding = name === 'HORN'
-    ? `<button type="button" class="add-finding">Add finding</button>`
-    : `<textarea class="insp-ta" data-task="${name}"></textarea>`;
-  return `<div class="grid-row insp-row" data-task="${name}">
-    <div class="rating-cell">
-      <div class="ratings">
-        <button type="button" class="rate rate-ok" aria-label="Checked &amp; Okay" aria-pressed="false"></button>
-        <button type="button" class="rate" aria-label="Requires Attention Soon" aria-pressed="false"></button>
-        <button type="button" class="rate" aria-label="Requires Immediate Attention" aria-pressed="false"></button>
-        <button type="button" class="rate" aria-label="Not Applicable" aria-pressed="false"></button>
-      </div>
-    </div>
-    <div class="name-cell">
-      <div role="row">
-        <span>${name}</span>
-        ${finding}
-      </div>
-    </div>
+    ? `<button type="button" class="add-finding">Add findings</button>`
+    : `<textarea class="block border-0 py-2 outline-none insp-ta" placeholder="Enter finding" data-task="${name}"></textarea>`;
+  return `<div class="insp-item" data-task="${name}">
+    <div class="insp-name">${name}</div>
+    ${finding}
   </div>`;
 }
 const htmlLive = `<!doctype html><html><body>
@@ -175,7 +166,7 @@ const htmlLive = `<!doctype html><html><body>
   <input id="global-search" type="text" placeholder="Search Tekmetric..." />
 </header>
 <div class="concerns">
-  <h3>Concerns</h3>
+  <h3>Customer Concerns</h3>
   <div class="concern-row">
     4 NEW WINTER TIRES
     <button type="button" class="add-finding">Add finding</button>
@@ -205,6 +196,7 @@ const htmlLive = `<!doctype html><html><body>
   </div>
 </div>
 </div>
+<textarea id="plain-notes"></textarea>
 <div id="junk"></div>
 <script>
 window.__rateAllUsed = false;
@@ -256,15 +248,17 @@ mui.addEventListener('mousedown', (e) => {
 document.addEventListener('mousedown', (e) => {
   const concern = e.target.closest('.concerns .add-finding');
   if (concern) { window.__concernClicked = true; return; }
-  const add = e.target.closest('.insp-card .add-finding');
+  const add = e.target.closest('.insp-card .add-finding, .insp-item .add-finding');
   if (!add) return;
   e.preventDefault();
-  const row = add.closest('.insp-row');
+  const row = add.closest('.insp-item, .insp-row');
+  if (!row) return;
   const task = row.getAttribute('data-task');
   const pop = document.createElement('div');
   pop.className = 'MuiPopover-root';
   const ta = document.createElement('textarea');
-  ta.className = 'portal-finding';
+  ta.className = 'block border-0 py-2 outline-none portal-finding';
+  ta.placeholder = 'Enter finding';
   ta.setAttribute('data-task', task);
   const save = () => { row.setAttribute('data-finding', ta.value || ''); };
   ta.addEventListener('input', save);
@@ -322,8 +316,8 @@ const SHARE_TASKS = ['WARNING LIGHTS ON DASH', 'CABIN AIR FILTER', 'HORN', 'BATT
 function shareRow(name) {
   const isAdd = name === 'HORN';
   const findings = isAdd
-    ? `<button type="button" class="add-finding insp-add">Add finding</button>`
-    : `<textarea class="insp-ta" data-task="${name}"></textarea>`;
+    ? `<button type="button" class="add-finding insp-add">Add findings</button>`
+    : `<textarea class="block border-0 py-2 outline-none insp-ta" placeholder="Enter finding" data-task="${name}"></textarea>`;
   return `<div class="grid-row insp-row" data-task="${name}">
     <div class="rating-cell">
       <div class="ratings">
@@ -407,7 +401,8 @@ document.addEventListener('mousedown', (e) => {
   e.preventDefault();
   const row = add.closest('.insp-row');
   const ta = document.createElement('textarea');
-  ta.className = 'insp-ta portal-finding';
+  ta.className = 'block border-0 py-2 outline-none insp-ta portal-finding';
+  ta.placeholder = 'Enter finding';
   ta.setAttribute('data-task', row.getAttribute('data-task'));
   const pop = document.createElement('div');
   pop.className = 'MuiPopover-root';
@@ -591,25 +586,25 @@ app.whenReady().then(async () => {
       longTaskErr: window.__longTaskErr || '',
       maxSlice: document.documentElement.dataset.tekproNfMaxSlice || '',
       obs: window.__obsCount || 0,
-      rows: [...document.querySelectorAll('.insp-card .insp-row, .insp-rows .insp-row')].map(r => {
+      rows: [...document.querySelectorAll('.insp-item')].map(r => {
         const ta = r.querySelector('textarea');
         return {
           task: r.getAttribute('data-task'),
-          finding: (ta && ta.value) || r.getAttribute('data-finding') || '',
-          green: (r.querySelector('.rate-ok') || {}).getAttribute ? r.querySelector('.rate-ok').getAttribute('aria-pressed') : null
+          finding: (ta && ta.value) || r.getAttribute('data-finding') || ''
         };
       }),
+      plain: (document.getElementById('plain-notes') || {}).value || '',
       concernText: [...document.querySelectorAll('.concern-row')].map(r => r.innerText)
     }))()`);
     console.log('B state', JSON.stringify(sB, null, 1));
     console.log('B elapsed ms', elapsed);
 
     if (sB.search !== '') throw new Error('B: wrote into the global search box: ' + JSON.stringify(sB.search));
+    if (sB.plain !== '') throw new Error('B: wrote into the plain placeholder-less textarea: ' + JSON.stringify(sB.plain));
     if (sB.concernClicked) throw new Error('B: clicked a Concerns "Add finding" button');
     if (!sB.rateAllUsed) throw new Error('B: Rate All Tasks (MUI mousedown + portal) was not used');
     if (sB.rows.length !== LIVE_TASKS.length) throw new Error('B: row count ' + sB.rows.length);
     for (const r of sB.rows) {
-      if (r.green !== 'true') throw new Error('B: not green: ' + r.task + ' pressed=' + r.green);
       const want = ph.phraseFor(r.task).text;
       if ((r.finding || '').trim() !== want) {
         throw new Error('B: wording for ' + r.task + ': got ' + JSON.stringify(r.finding) + ' want ' + JSON.stringify(want));
