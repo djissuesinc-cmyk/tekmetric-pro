@@ -75,8 +75,10 @@ ipcRenderer.on('settings-changed', (event, newSettings) => {
     toggleSidebarVisibility();
 });
 
-// v2.4.3: Fill "No Faults" — hard allow-list on the inspection card. Never click, focus,
-// or write in Customer Concerns or the header. Rate All / Add finding stay in-card.
+// v2.4.4: Fill "No Faults" — find finding fields the 2.3.9/2.4.0 way (querySelectorAll
+// textarea + forceNativeInput with Enter to commit). Labels from the row (2.4.1 climb +
+// glued "Add finding" cleanup), item-specific wording, Rate All Tasks (2.4.3, works live),
+// skip Concerns / header search. No card-root gate (that produced rows=0 on the live page).
 const NF_GENERIC = 'No faults found at this time.';
 const NF_CLICK = 'button, a, [role="button"], [role="radio"], [role="menuitem"], [role="option"], [role="tab"], input[type="button"], input[type="radio"], input[type="checkbox"]';
 const NF_FIELD = 'textarea, input[type="text"], input[type="search"], input:not([type]), [contenteditable="true"], [contenteditable=""]';
@@ -226,13 +228,13 @@ function nfInAllowedPortal(el) {
 function nfDenyReason(el, opts) {
     opts = opts || {};
     if (!el) return 'no-target';
-    if (!nfActiveCard) return 'no inspection card';
     if (nfIsHeaderOrSearch(el)) return 'header/search';
     if (nfInConcerns(el)) return 'in concerns';
-    const inCard = (el === nfActiveCard || (nfActiveCard.contains && nfActiveCard.contains(el)));
-    if (inCard) return '';
+    // 2.4.3 required card.contains(el). The live card root was often just the
+    // header bar (title + Rate All, no rows) or a page wrapper; every finding
+    // was then refused (rows=0). Guards are Concerns + header/search only.
     if (opts.portal && nfInAllowedPortal(el)) return '';
-    return 'outside inspection card';
+    return '';
 }
 
 function nfIsAllowed(el, opts) {
@@ -679,7 +681,7 @@ function getInspectionLabel(ta, rowHint) {
         }
         for (const d of direct) { const c = nfCleanLabel(d); if (c && !/^add finding$/i.test(c) && !/^search\b/i.test(c)) return c; }
 
-        const row = rowHint;
+        const row = rowHint || nfClosestRow(ta);
         if (row) {
             const kids = Array.from(row.children);
             const clusters = nfRatingClusters(row);
@@ -869,12 +871,30 @@ function nfAssociatedControl(from) {
     return from.closest && (from.closest('button, [role="button"], [aria-haspopup], select')) || from;
 }
 
+function nfFindAllRateAllControls() {
+    const out = [];
+    const seen = new Set();
+    const consider = (host) => {
+        if (!host) return;
+        const control = nfAssociatedControl(host) || host;
+        if (!control || seen.has(control)) return;
+        if (nfInConcerns(control) || nfInConcerns(host)) return;
+        seen.add(control);
+        out.push(control);
+    };
+    try {
+        nfFindText(document.body, /rate all tasks/i, 20000).forEach(n => consider(n.parentElement || n));
+        nfScanMarks(document.body, (t) => /rate all tasks/i.test(t), 800).forEach(consider);
+    } catch (e) {}
+    return out;
+}
+
 function nfFindRateAllControl(card) {
-    if (!card) return { control: null, info: { how: 'not-found' } };
-    const root = card;
+    // Prefer a scope if the caller has one, but never refuse to look document-wide —
+    // a wrong card root (header bar) would hide the button that 2.4.3 already found live.
+    const root = (card && card.querySelectorAll) ? card : document.body;
     const info = { how: '', tag: '', role: '', text: '', aria: '', haspopup: '' };
-    // 1) Text "Rate All Tasks" only inside the inspection card — never document-wide.
-    const hits = nfFindText(root, /rate all tasks/i, 6000);
+    const hits = nfFindText(root, /rate all tasks/i, 20000);
     if (hits.length) {
         const node = hits[0];
         const host = node.parentElement || node;
@@ -924,18 +944,22 @@ function nfFindRateAllControl(card) {
     return { control: null, info: { how: 'not-found' } };
 }
 
-async function nfRateAllGreen(card) {
-    if (!card) return false;
-    const found = nfFindRateAllControl(card);
-    const control = found.control;
-    nfLog('rate-all: ' + JSON.stringify(found.info) + (control ? ' desc=' + nfDescribe(control) : ''));
-    if (!control) {
-        nfLog('rate-all: control not found, will rate each row');
+async function nfRateAllGreenOn(control) {
+    if (!control) return false;
+    nfLog('rate-all: ' + JSON.stringify({
+        how: 'text-node',
+        tag: control.tagName,
+        role: control.getAttribute('role') || '',
+        text: nfOwnTextCheap(control, 80),
+        aria: control.getAttribute('aria-label') || '',
+        haspopup: control.getAttribute('aria-haspopup') || ''
+    }) + ' desc=' + nfDescribe(control));
+    if (nfInConcerns(control) || nfIsHeaderOrSearch(control) && !/rate all tasks/i.test(nfElementMarkText(control, 80))) {
+        nfLog('rate-all: skipping control in concerns/header ' + nfDescribe(control));
         return false;
     }
-    if (!nfAllow(control, 'rate-all')) return false;
     const sel = (control.tagName === 'SELECT' ? control : (control.closest && control.closest('select')));
-    if (sel && sel.options && nfIsAllowed(sel)) {
+    if (sel && sel.options && !nfInConcerns(sel)) {
         const option = Array.from(sel.options).find(o => NF_GREEN_RE.test(o.text)) || Array.from(sel.options).find(o => /checked|okay|ok/i.test(o.text));
         if (option) {
             const last = sel.value;
@@ -949,23 +973,37 @@ async function nfRateAllGreen(card) {
         }
     }
     // MUI Select opens on mousedown (click alone is not enough). Full pointer sequence.
+    // This is the 2.4.3 path that works live (button.MuiButtonBase-root "Rate All Tasks"
+    // -> "Checked & Okay").
     const before = nfSnapshotDom();
+    const hiddenBefore = new Set();
+    try {
+        document.querySelectorAll(NF_MENU_SEL + ', [role="menu"], [id*="rate-all-menu"]').forEach(m => {
+            if (m.hidden || m.getAttribute('aria-hidden') === 'true') hiddenBefore.add(m);
+        });
+    } catch (e) {}
     const clicked = await nfPointer(control, 'rate-all');
     if (!clicked) return false;
     nfSliceStart = performance.now();
     const menu = await nfWait(() => {
         try {
             nfGrantNewPortals(before);
-            // Prefer a menu inside the card (classic unhidden sibling) or a portal we just opened.
             const cands = [];
-            try { card.querySelectorAll(NF_MENU_SEL).forEach(m => cands.push(m)); } catch (e) {}
             try { document.querySelectorAll(NF_MENU_SEL).forEach(m => cands.push(m)); } catch (e) {}
+            try {
+                const near = control.parentElement && control.parentElement.querySelectorAll('[role="menuitem"], [role="option"]');
+                if (near) near.forEach(it => { if (it.parentElement) cands.push(it.parentElement); });
+            } catch (e) {}
             for (const m of cands) {
-                if (!m || m.hidden || m.getAttribute('aria-hidden') === 'true') continue;
+                if (!m) continue;
                 if (nfInConcerns(m)) continue;
-                const inCard = (m === card || card.contains(m));
-                const allowed = inCard || nfInAllowedPortal(m) || !before.has(m);
-                if (allowed) return m;
+                const vis = !m.hidden && m.getAttribute('aria-hidden') !== 'true';
+                if (!vis) continue;
+                const justShown = hiddenBefore.has(m);
+                const isNew = !before.has(m);
+                const granted = nfInAllowedPortal(m);
+                const nearControl = control.parentElement && control.parentElement.contains(m);
+                if (justShown || isNew || granted || nearControl) return m;
             }
             const items = document.querySelectorAll('[role="menuitem"], [role="option"]');
             for (const it of items) {
@@ -973,16 +1011,18 @@ async function nfRateAllGreen(card) {
                 const par = it.parentElement;
                 if (!par || par.hidden || par.getAttribute('aria-hidden') === 'true') continue;
                 if (par === control || (control && control.contains(par))) continue;
-                const inCard = (par === card || card.contains(par) || card.contains(it));
-                const allowed = inCard || nfInAllowedPortal(it) || nfInAllowedPortal(par) || !before.has(par);
-                if (allowed) return par;
+                const justShown = hiddenBefore.has(par);
+                const isNew = !before.has(par) || !before.has(it);
+                const granted = nfInAllowedPortal(it) || nfInAllowedPortal(par);
+                const nearControl = control.parentElement && control.parentElement.contains(par);
+                if (justShown || isNew || granted || nearControl) return par;
             }
         } catch (e) {}
         return null;
     }, 600, 40);
     if (menu) {
         nfGrantNewPortals(before);
-        if (!nfInAllowedPortal(menu) && !(menu === card || card.contains(menu))) nfAllowedPortals.add(menu);
+        if (!nfInAllowedPortal(menu)) nfAllowedPortals.add(menu);
         const options = Array.from(menu.querySelectorAll('[role="option"], [role="menuitem"], li, .MuiMenuItem-root'));
         const optInfo = options.slice(0, 8).map(o => ({
             text: nfOwnTextCheap(o, 60),
@@ -1005,6 +1045,20 @@ async function nfRateAllGreen(card) {
     nfLog('rate-all: menu not found after pointer, html=' + JSON.stringify(nfHtmlSnippet(document.querySelector('.MuiPopover-root, .MuiModal-root, [role="presentation"]'), 200)));
     try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); } catch (e) {}
     return false;
+}
+
+async function nfRateAllGreen(card) {
+    // Back-compat wrapper. New fill uses nfFindAllRateAllControls + nfRateAllGreenOn.
+    const list = card ? [nfFindRateAllControl(card).control].filter(Boolean) : nfFindAllRateAllControls();
+    if (!list.length) {
+        nfLog('rate-all: control not found, will rate each row');
+        return false;
+    }
+    let any = false;
+    for (const c of list) {
+        if (await nfRateAllGreenOn(c)) any = true;
+    }
+    return any;
 }
 
 async function nfRateRowGreen(row) {
@@ -1101,6 +1155,75 @@ function nfResumeWorld() {
     try { if (typeof observer !== 'undefined' && observer && document.body) observer.observe(document.body, { childList: true, subtree: true }); } catch (e) {}
 }
 
+async function nfCommit(el, val) {
+    // 2.3.9 / 2.4.0 commit: native value setter, input + change, Enter, then blur.
+    if (!el) return false;
+    if (nfIsHeaderOrSearch(el) || nfIsSearchBox(el) || nfInConcerns(el)) {
+        nfLog('skip write: ' + nfDenyReason(el, {}) + ' ' + nfDescribe(el));
+        return false;
+    }
+    try {
+        if (nfIsContentEditable(el)) {
+            try { el.focus(); } catch (e) {}
+            el.textContent = val;
+            try { el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: val, inputType: 'insertText' })); }
+            catch (e) { el.dispatchEvent(new Event('input', { bubbles: true, composed: true })); }
+            el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+            try { el.blur(); } catch (e) {}
+            return true;
+        }
+        forceNativeInput(el, val);
+        return true;
+    } catch (e) {
+        nfLog('commit error: ' + (e && e.message));
+        return false;
+    }
+}
+
+function nfCollectFindingFields() {
+    // 2.3.9 / 2.4.0: the live sheet already has a <textarea> per inspection task.
+    // That query found all 23 fields (2.4.0 log). We also pick up contenteditable
+    // (used in tests) and then skip Concerns / header / search.
+    const raw = [];
+    const seen = new Set();
+    const push = (el) => { if (el && !seen.has(el)) { seen.add(el); raw.push(el); } };
+    try { document.querySelectorAll('textarea').forEach(push); } catch (e) {}
+    try { document.querySelectorAll('[contenteditable="true"], [contenteditable=""]').forEach(push); } catch (e) {}
+    const out = [];
+    for (const el of raw) {
+        if (el.disabled || el.readOnly) continue;
+        if (nfIsSearchBox(el) || nfIsHeaderOrSearch(el)) {
+            nfLog('skip field header/search ' + nfDescribe(el));
+            continue;
+        }
+        if (nfInConcerns(el)) {
+            nfLog('skip field in concerns ' + nfDescribe(el));
+            continue;
+        }
+        // Leftover portals / random page boxes that aren't on an inspection row.
+        // (Fields we open via Add finding are added by the caller, with the row remembered.)
+        if (!nfClosestRow(el)) {
+            nfLog('skip field with no inspection row ' + nfDescribe(el));
+            continue;
+        }
+        out.push(el);
+    }
+    return out;
+}
+
+function nfCollectAddFindingButtons() {
+    const out = [];
+    try {
+        const els = document.querySelectorAll('a, button, [role="button"], [role="link"]');
+        for (const el of els) {
+            if (!/^add finding$/i.test(nfOwnTextCheap(el, 32))) continue;
+            if (nfInConcerns(el) || nfIsHeaderOrSearch(el)) continue;
+            out.push(el);
+        }
+    } catch (e) {}
+    return out;
+}
+
 async function fillNoFaults() {
     if (nfBusy) { nfLog('fill ignored, already running'); return; }
     nfBusy = true;
@@ -1114,63 +1237,84 @@ async function fillNoFaults() {
         await nfLoadBook();
         nfLog('fill start url=' + String(location.href || '').slice(0, 180));
         nfResetAllowList();
-        const card = nfFindCard();
-        if (!card) {
-            nfLog('card not found ' + JSON.stringify(nfHtmlSnippet(document.body, 300)));
-            return;
+        nfRefreshConcernsRoots();
+
+        // Rate All Tasks — document-wide (the 2.4.3 finder that works live). One
+        // control per inspection header if several cards are on the page.
+        const rateControls = nfFindAllRateAllControls();
+        let ratedAll = false;
+        if (!rateControls.length) {
+            nfLog('rate-all: control not found, will rate each row');
         }
-        nfActiveCard = card;
-        nfLog('card=' + nfDescribe(card) + ' html=' + JSON.stringify(nfHtmlSnippet(card, 200)));
-        const ratedAll = await nfRateAllGreen(card);
-        nfSliceStart = performance.now();
+        for (const ctl of rateControls) {
+            const ok = await nfRateAllGreenOn(ctl);
+            nfSliceStart = performance.now();
+            if (ok) ratedAll = true;
+        }
         await nfYield();
-        const rows = nfFindRows(card);
-        nfLog('fill rows=' + rows.length + ' rateAll=' + ratedAll);
-        if (!rows.length) {
-            nfLog('fill: no inspection rows in card, aborting (will not touch search or concerns)');
+
+        // Primary path: existing finding textareas (2.3.9 / 2.4.0).
+        let fields = nfCollectFindingFields();
+        const fieldRow = new Map();
+        for (const f of fields) {
+            const r = nfClosestRow(f);
+            if (r) fieldRow.set(f, r);
+        }
+        nfLog('fill fields=' + fields.length + (fields[0] ? (' first=' + nfDescribe(fields[0]) + ' row=' + JSON.stringify(nfHtmlSnippet(fieldRow.get(fields[0]) || fields[0].parentElement, 300))) : ''));
+
+        // Secondary: "Add finding" only for inspection rows that still have no field.
+        // The findings box may open in a body portal — remember the row we clicked so the label still resolves.
+        const adds = nfCollectAddFindingButtons();
+        for (const add of adds) {
+            if (performance.now() > deadline) break;
+            const row = nfClosestRow(add) || add.parentElement;
+            if (row && (nfInConcerns(row) || nfIsConcernsRow(row))) continue;
+            if (row && fields.some(f => fieldRow.get(f) === row || (row.contains && row.contains(f)))) continue;
+            const opened = await nfOpenFinding(row || add, fields.length === 0);
+            if (opened && !fields.includes(opened) && !nfInConcerns(opened) && !nfIsSearchBox(opened)) {
+                fields.push(opened);
+                if (row) fieldRow.set(opened, row);
+                nfLog('fill opened add-finding into=' + nfDescribe(opened) + ' label-row=' + JSON.stringify(getInspectionLabel(opened, row)) + ' after=' + JSON.stringify(nfHtmlSnippet(opened, 200)));
+            }
+        }
+        nfLog('fill fields after add-finding=' + fields.length + ' rateAll=' + ratedAll);
+
+        if (!fields.length) {
+            nfLog('fill: no finding fields (none of the 2.3.9 textarea query, and no Add finding opened one)');
             return;
         }
-        nfLogRowChain(rows[0], 'first-row');
+        if (fields[0]) nfLogRowChain(nfClosestRow(fields[0]) || fields[0].parentElement, 'first-row');
+
         const labels = [];
         const snippets = [];
-        for (const row of rows) {
-            const field = nfVisibleFields(row)[0] || null;
+        for (const field of fields) {
+            const row = fieldRow.get(field) || nfClosestRow(field);
             labels.push(getInspectionLabel(field, row));
-            snippets.push(nfStripNoise(nfCellText(row, field)).slice(0, 160));
+            snippets.push(nfStripNoise(nfCellText(row || field, field)).slice(0, 160));
         }
         let texts = null;
         try { texts = await nfInvoke({ action: 'fill', labels, snippets }); } catch (e) {}
+
         let filled = 0, skipped = 0, failed = 0;
-        for (let i = 0; i < rows.length; i++) {
-            if (performance.now() > deadline) { nfLog('fill timeout at row ' + i); break; }
+        for (let i = 0; i < fields.length; i++) {
+            if (performance.now() > deadline) { nfLog('fill timeout at field ' + i); break; }
             await nfYield();
-            const row = rows[i];
-            if (nfInConcerns(row) || nfIsConcernsRow(row) || !(row === card || card.contains(row))) {
-                nfLog('fill #' + i + ' skip row outside inspection card');
+            const field = fields[i];
+            if (nfInConcerns(field) || nfIsSearchBox(field) || nfIsHeaderOrSearch(field)) {
+                nfLog('fill #' + i + ' skip concerns/search ' + nfDescribe(field));
                 failed++;
                 continue;
             }
-            if (!ratedAll) {
+            const row = fieldRow.get(field) || nfClosestRow(field);
+            if (!ratedAll && row && !nfInConcerns(row)) {
                 const r = await nfRateRowGreen(row);
                 nfSliceStart = performance.now();
                 if (r !== 'already-green') nfLog('fill #' + i + ' rate-row=' + r);
             }
-            const existingField = nfVisibleFields(row)[0];
-            const existing = existingField ? nfFieldValue(existingField) : '';
+            const existing = nfFieldValue(field);
             if (existing && !nfIsGenerated(existing)) {
                 nfLog('fill #' + i + ' skip existing text label=' + JSON.stringify(labels[i]));
                 skipped++;
-                continue;
-            }
-            const field = await nfOpenFinding(row, i === 0);
-            if (!field) {
-                nfLog('fill #' + i + ' no field label=' + JSON.stringify(labels[i]) + ' row=' + JSON.stringify(snippets[i]));
-                failed++;
-                continue;
-            }
-            if (nfIsSearchBox(field)) {
-                nfLog('fill #' + i + ' refused search box ' + nfDescribe(field));
-                failed++;
                 continue;
             }
             let label = labels[i] || getInspectionLabel(field, row);
@@ -1183,47 +1327,15 @@ async function fillNoFaults() {
                     if (again && again[0]) use = again[0];
                 } catch (e) {}
             }
-            const wrote = await nfSetValue(field, use);
+            const wrote = nfCommit(field, use);
             if (!wrote) { failed++; continue; }
             nfLog('fill #' + i + ' wrote label=' + JSON.stringify(label) + ' chars=' + use.length + ' into=' + nfDescribe(field));
             filled++;
-            // Close a leftover portal so the next row starts clean.
-            try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); } catch (e) {}
         }
-        // Conservative second pass: only if the first pass left failures. Do not reopen
-        // "Add finding" on a row we already filled — that writes into a leftover/hidden portal.
-        if (failed > 0 && performance.now() < deadline) {
-            await nfYield();
-            const again = nfFindRows(card);
-            for (const row of again) {
-                if (nfInConcerns(row) || nfIsConcernsRow(row) || !(row === card || card.contains(row))) continue;
-                if (rows.includes(row)) {
-                    const vis = nfVisibleFields(row)[0];
-                    if (!vis || nfFieldValue(vis)) continue; // no empty visible field left to fill
-                }
-                if (performance.now() > deadline) break;
-                await nfYield();
-                if (!ratedAll) { await nfRateRowGreen(row); nfSliceStart = performance.now(); }
-                const existingField = nfVisibleFields(row)[0];
-                const existing = existingField ? nfFieldValue(existingField) : '';
-                if (existing && !nfIsGenerated(existing)) { skipped++; continue; }
-                const field = await nfOpenFinding(row, false);
-                if (!field || nfIsSearchBox(field) || !nfIsVisible(field)) continue;
-                const label = getInspectionLabel(field, row);
-                let use = NF_GENERIC;
-                try {
-                    const got = await nfInvoke({ action: 'fill', labels: [label], snippets: [nfStripNoise(nfCellText(row)).slice(0, 160)] });
-                    if (got && got[0]) use = got[0];
-                } catch (e) {}
-                const wrote = await nfSetValue(field, use);
-                if (!wrote) continue;
-                filled++;
-                nfLog('fill extra wrote label=' + JSON.stringify(label) + ' into=' + nfDescribe(field));
-                try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); } catch (e) {}
-            }
-        }
+        // Let 2.3.9's 50ms blur timers finish.
+        await nfSleep(80);
         nfMarkSlice();
-        nfLog('fill done filled=' + filled + ' skipped=' + skipped + ' failed=' + failed + ' rows=' + rows.length + ' ms=' + Math.round(performance.now() - t0) + ' maxSlice=' + Math.round(nfMaxSlice));
+        nfLog('fill done filled=' + filled + ' skipped=' + skipped + ' failed=' + failed + ' fields=' + fields.length + ' ms=' + Math.round(performance.now() - t0) + ' maxSlice=' + Math.round(nfMaxSlice));
     } catch (e) {
         nfLog('fill error: ' + (e && e.message) + ' ' + (e && e.stack));
     } finally {
@@ -1249,25 +1361,21 @@ async function clearNoFaults() {
         await nfLoadBook();
         nfLog('clear start');
         nfResetAllowList();
-        const card = nfFindCard();
-        if (!card) {
-            nfLog('card not found ' + JSON.stringify(nfHtmlSnippet(document.body, 300)));
-            return;
-        }
-        nfActiveCard = card;
-        const fields = nfFields(card).filter(f => nfFieldValue(f) && !nfIsSearchBox(f) && nfIsAllowed(f, { portal: true }) && !nfInConcerns(f));
+        nfRefreshConcernsRoots();
+        // Same 2.3.9 query, then skip Concerns / search. Only remove generated text.
+        const fields = nfCollectFindingFields().filter(f => nfFieldValue(f));
         if (!fields.length) { nfLog('clear: no filled fields'); return; }
         let flags = null;
         try { flags = await nfInvoke({ action: 'clear', values: fields.map(f => nfFieldValue(f)) }); } catch (e) {}
         let n = 0;
         for (let i = 0; i < fields.length; i++) {
-            await nfYield();
             const generated = flags ? flags[i] === true : nfIsGenerated(nfFieldValue(fields[i]));
             if (generated) {
-                await nfSetValue(fields[i], '');
+                nfCommit(fields[i], '');
                 n++;
             }
         }
+        await nfSleep(80);
         nfLog('clear done removed=' + n + ' of ' + fields.length);
     } catch (e) {
         nfLog('clear error: ' + (e && e.message));

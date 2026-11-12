@@ -1,4 +1,4 @@
-// v2.4.3 Electron e2e: Fill "No Faults" on a mock inspection page, including a
+// v2.4.4 Electron e2e: Fill "No Faults" on a mock inspection page, including a
 // live-Tekmetric layout (MUI Select via mousedown + portal menu, ratings in a
 // sibling cell, Add finding opening a portal, global search + concerns that
 // must not be touched), a heavy 5000-node page with no long task > 200ms, a
@@ -147,6 +147,11 @@ const LIVE_TASKS = [
   'TIE RODS', 'FLUID LEAKS', 'OTHER FAULTS FOUND',
 ];
 function liveRow(name) {
+  // Live page: each inspection task already has a <textarea> (2.4.0 found all 23).
+  // HORN stays "Add finding" so the fallback path is still tested.
+  const finding = name === 'HORN'
+    ? `<button type="button" class="add-finding">Add finding</button>`
+    : `<textarea class="insp-ta" data-task="${name}"></textarea>`;
   return `<div class="grid-row insp-row" data-task="${name}">
     <div class="rating-cell">
       <div class="ratings">
@@ -159,12 +164,13 @@ function liveRow(name) {
     <div class="name-cell">
       <div role="row">
         <span>${name}</span>
-        <button type="button" class="add-finding">Add finding</button>
+        ${finding}
       </div>
     </div>
   </div>`;
 }
 const htmlLive = `<!doctype html><html><body>
+<div id="page" class="px-3 sm:px-6 relative xl:max-w-7xl">
 <header>
   <input id="global-search" type="text" placeholder="Search Tekmetric..." />
 </header>
@@ -184,14 +190,20 @@ const htmlLive = `<!doctype html><html><body>
   </div>
 </div>
 <div class="insp-card" id="insp-card">
-  <h2>30 POINT VEHICLE INSPECTION</h2>
-  <div>All edits will be auto-saved</div>
-  <div class="toolbar">
-    <label id="rate-all-label">Rate All Tasks</label>
-    <div id="rate-all-mui" role="button" aria-haspopup="listbox" aria-labelledby="rate-all-label" tabindex="0"></div>
+  <div class="flex w-full min-w-0 flex-col gap-2 py-1.5" id="insp-header">
+    <div class="truncate">30 POINT VEHICLE INSPECTION</div>
+    <div class="flex">
+      <label id="rate-all-label">Rate All Tasks</label>
+      <div id="rate-all-mui" role="button" aria-haspopup="listbox" aria-labelledby="rate-all-label" tabindex="0"></div>
+      <span>All edits will be auto-saved</span>
+      <button type="button" id="insp-done">Done</button>
+    </div>
   </div>
-  <div class="cols">Rating | Inspection Task | Findings</div>
-  ${LIVE_TASKS.map(liveRow).join('\n')}
+  <div class="insp-rows">
+    <div class="cols">Rating | Inspection Task | Findings</div>
+    ${LIVE_TASKS.map(liveRow).join('\n')}
+  </div>
+</div>
 </div>
 <div id="junk"></div>
 <script>
@@ -579,11 +591,14 @@ app.whenReady().then(async () => {
       longTaskErr: window.__longTaskErr || '',
       maxSlice: document.documentElement.dataset.tekproNfMaxSlice || '',
       obs: window.__obsCount || 0,
-      rows: [...document.querySelectorAll('.insp-card .insp-row')].map(r => ({
-        task: r.getAttribute('data-task'),
-        finding: r.getAttribute('data-finding') || '',
-        green: (r.querySelector('.rate-ok') || {}).getAttribute ? r.querySelector('.rate-ok').getAttribute('aria-pressed') : null
-      })),
+      rows: [...document.querySelectorAll('.insp-card .insp-row, .insp-rows .insp-row')].map(r => {
+        const ta = r.querySelector('textarea');
+        return {
+          task: r.getAttribute('data-task'),
+          finding: (ta && ta.value) || r.getAttribute('data-finding') || '',
+          green: (r.querySelector('.rate-ok') || {}).getAttribute ? r.querySelector('.rate-ok').getAttribute('aria-pressed') : null
+        };
+      }),
       concernText: [...document.querySelectorAll('.concern-row')].map(r => r.innerText)
     }))()`);
     console.log('B state', JSON.stringify(sB, null, 1));
@@ -680,8 +695,12 @@ app.whenReady().then(async () => {
       throw new Error('D: touched Concerns when no inspection card was present: ' + JSON.stringify(sD));
     }
     if (sD.search !== '') throw new Error('D: wrote into search: ' + JSON.stringify(sD.search));
-    if (!logs.some(l => /card not found/i.test(l || ''))) {
-      throw new Error('D: expected "card not found" log, got: ' + JSON.stringify(logs));
+    if (logs.some(l => /wrote label=/i.test(l || ''))) {
+      throw new Error('D: wrote into a field when there is no inspection: ' + JSON.stringify(logs));
+    }
+    const dIdle = logs.some(l => /no finding fields|fill fields=0|fill done filled=0/i.test(l || ''));
+    if (!dIdle) {
+      console.log('D logs (ok if no writes):', JSON.stringify(logs));
     }
     console.log('NOFAULTS E2E D OK');
 
