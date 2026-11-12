@@ -75,22 +75,85 @@ ipcRenderer.on('settings-changed', (event, newSettings) => {
     toggleSidebarVisibility();
 });
 
-ipcRenderer.on('fill-no-faults', () => {
-    document.querySelectorAll('textarea').forEach(ta => {
-        if (!ta.value || ta.value.trim() === '') {
-            forceNativeInput(ta, 'No faults found at this time.');
-        }
-    });
-});
+// v2.4.0: "No Faults" writes wording for each inspection item. We don't know Tekmetric's exact DOM,
+// so the item name is searched for defensively near each textarea.
+const NF_GENERIC = 'No faults found at this time.';
+const NF_SKIP = /^(notes?|findings?|comments?|recommendations?|technician notes?|tech notes?|add (a )?(note|finding|comment)s?|details?|description|good|fair|poor|ok|pass(ed)?|fail(ed)?|green|yellow|red|needs attention|attention|urgent|not inspected|n\/a|na|none|inspection|inspections|status|condition|select|save|cancel|edit|delete|remove|photo|photos|video|media|upload|type here.*|enter .*|write .*)$/i;
+const NF_HEAD_SEL = 'h1,h2,h3,h4,h5,h6,legend,label,strong,b,[role="heading"],[class*="title" i],[class*="name" i],[class*="label" i],[class*="header" i],[class*="heading" i]';
 
-ipcRenderer.on('clear-no-faults', () => {
-    document.querySelectorAll('textarea').forEach(ta => {
-        const val = (ta.value || "").toUpperCase();
-        if (val === 'NO FAULTS FOUND AT THIS TIME.') {
-            forceNativeInput(ta, '');
+function nfClean(t) {
+    const s = String(t || '').replace(/\s+/g, ' ').trim().replace(/[:*\u2022\-\s]+$/, '');
+    if (s.length < 2 || s.length > 80 || !/[a-z]/i.test(s) || NF_SKIP.test(s)) return '';
+    return s;
+}
+// Text of an element without anything that contains form fields or buttons
+function nfOwnText(el) {
+    if (!el || el.nodeType !== 1) return '';
+    if (el.matches('textarea,input,select,button,script,style,svg,[role="button"],[role="radiogroup"]') || el.querySelector('textarea,input,select,button,[role="button"],[role="radio"]')) return '';
+    return el.textContent || '';
+}
+function nfBefore(a, b) { return !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING); }
+
+function getInspectionLabel(ta) {
+    try {
+        const direct = [];
+        const lb = ta.getAttribute('aria-labelledby');
+        if (lb) direct.push(lb.split(/\s+/).map(id => { const e = document.getElementById(id); return e ? e.textContent : ''; }).join(' '));
+        direct.push(ta.getAttribute('aria-label'));
+        if (ta.id) { try { const l = document.querySelector('label[for="' + CSS.escape(ta.id) + '"]'); if (l) direct.push(l.textContent); } catch (e) {} }
+        const wrap = ta.closest('label'); if (wrap) direct.push(nfOwnText(wrap) || wrap.textContent.replace(ta.value || '', ''));
+        direct.push(ta.getAttribute('placeholder'), ta.getAttribute('title'), ta.getAttribute('name'));
+        for (const d of direct) { const c = nfClean(d); if (c) return c; }
+
+        let node = ta;
+        for (let depth = 0; depth < 6 && node && node !== document.body; depth++) {
+            const parent = node.parentElement;
+            if (!parent) break;
+            const sibs = [];
+            for (let sib = node.previousElementSibling; sib && sibs.length < 6; sib = sib.previousElementSibling) sibs.push(sib);
+            // 1) title/name/label/header-like elements in the nearest preceding siblings
+            for (const sib of sibs) {
+                const h = (sib.matches(NF_HEAD_SEL) ? [sib] : []).concat(Array.from(sib.querySelectorAll(NF_HEAD_SEL)).reverse());
+                for (const e of h) { const c = nfClean(nfOwnText(e)); if (c) return c; }
+            }
+            // 2) header-like elements anywhere in this ancestor that come before the textarea
+            const heads = Array.from(parent.querySelectorAll(NF_HEAD_SEL)).filter(e => !e.contains(ta) && nfBefore(e, ta)).reverse();
+            for (const e of heads) { const c = nfClean(nfOwnText(e)); if (c) return c; }
+            // 3) plain short text in the nearest preceding siblings
+            for (const sib of sibs) { const c = nfClean(nfOwnText(sib)); if (c) return c; }
+            node = parent;
         }
+    } catch (e) { console.log('[tekpro-nf] label error', e && e.message); }
+    return '';
+}
+
+function fillNoFaults() {
+    const tas = Array.from(document.querySelectorAll('textarea')).filter(ta => !ta.value || ta.value.trim() === '');
+    if (!tas.length) return;
+    const labels = tas.map(getInspectionLabel);
+    let texts = null;
+    try { texts = ipcRenderer.sendSync('inspection-phrases', { action: 'fill', labels }); } catch (e) {}
+    tas.forEach((ta, i) => {
+        const t = (texts && texts[i]) || NF_GENERIC;
+        console.log('[tekpro-nf] label=' + JSON.stringify(labels[i]) + ' -> ' + t.split('\n')[0]);
+        forceNativeInput(ta, t);
     });
-});
+}
+
+function clearNoFaults() {
+    const tas = Array.from(document.querySelectorAll('textarea')).filter(ta => ta.value && ta.value.trim() !== '');
+    if (!tas.length) return;
+    let flags = null;
+    try { flags = ipcRenderer.sendSync('inspection-phrases', { action: 'clear', values: tas.map(ta => ta.value) }); } catch (e) {}
+    tas.forEach((ta, i) => {
+        const generated = flags ? flags[i] === true : (ta.value || '').trim().toUpperCase() === NF_GENERIC.toUpperCase();
+        if (generated) forceNativeInput(ta, '');
+    });
+}
+
+ipcRenderer.on('fill-no-faults', () => fillNoFaults());
+
+ipcRenderer.on('clear-no-faults', () => clearNoFaults());
 
 ipcRenderer.on('insert-text', (event, textToInsert) => {
     injectText(textToInsert);
@@ -445,21 +508,12 @@ function injectSidebarButtons() {
     
     container.appendChild(createBtn('Fill "No Faults" (Ctrl+Alt+N)', (e) => {
         e.preventDefault();
-        document.querySelectorAll('textarea').forEach(ta => {
-            if (!ta.value || ta.value.trim() === '') {
-                forceNativeInput(ta, 'No faults found at this time.');
-            }
-        });
+        fillNoFaults();
     }));
 
     container.appendChild(createBtn('Undo "No Faults" (Ctrl+Alt+C)', (e) => {
         e.preventDefault();
-        document.querySelectorAll('textarea').forEach(ta => {
-            const val = (ta.value || "").toUpperCase();
-            if (val === 'NO FAULTS FOUND AT THIS TIME.') {
-                forceNativeInput(ta, '');
-            }
-        });
+        clearNoFaults();
     }));
 
     const scrollBox = document.createElement('div');

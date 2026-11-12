@@ -372,6 +372,19 @@ function pdfLog(msg) {
     _pdfLogBuf += new Date().toISOString() + ' ' + msg + '\n';
     if (!_pdfLogTimer) _pdfLogTimer = setTimeout(pdfLogFlush, 50);
 }
+// v2.4.0: item-specific "No Faults" wording (preload is sandboxed, so the library lives here)
+const inspectionPhrases = require('./inspection-phrases');
+ipcMain.on('inspection-phrases', (event, req) => {
+    try {
+        if (req && req.action === 'fill') {
+            const out = (req.labels || []).map(l => inspectionPhrases.phraseFor(l));
+            out.forEach((r, i) => pdfLog('no-faults fill #' + i + ' label=' + JSON.stringify(req.labels[i] || '') + ' -> ' + (r.rule || 'GENERIC')));
+            event.returnValue = out.map(r => r.text);
+        } else if (req && req.action === 'clear') {
+            event.returnValue = (req.values || []).map(v => inspectionPhrases.isGeneratedPhrase(v));
+        } else event.returnValue = null;
+    } catch (e) { pdfLog('inspection-phrases error: ' + (e && e.message)); event.returnValue = null; }
+});
 ipcMain.on('get-pdf-hook', (event) => { event.returnValue = PDF_HOOK_SRC; });
 
 // Logging + main-world hook + fallback PDF detector for any window (main or child)
