@@ -1,4 +1,4 @@
-// v2.4.1: item-specific wording for the Quick Actions "Fill No Faults" button.
+// v2.4.2: item-specific wording for the Quick Actions "Fill No Faults" button.
 // Each rule: canonical item name, keyword patterns (tested against the lower-cased item label),
 // and the sentence written in the Findings field. Order matters: most specific rules first.
 // Finding text is the sentence only — the row already shows the item name.
@@ -164,6 +164,9 @@ function norm(s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim()
 
 function cleanLabel(label) {
     let s = String(label == null ? '' : label).replace(/\s+/g, ' ').trim();
+    // Live Tekmetric concatenates the "Add finding" control onto the task name ("HORNAdd finding").
+    s = s.replace(/add\s*finding/ig, ' ').replace(/add\s*media/ig, ' ');
+    s = s.replace(/\s+/g, ' ').trim();
     s = s.replace(/[:*\u2022\-–—\s]+$/, '').replace(/^[\d.)\s\-–—\u2022]+(?=[a-z])/i, '').trim();
     return s;
 }

@@ -372,25 +372,40 @@ function pdfLog(msg) {
     _pdfLogBuf += new Date().toISOString() + ' ' + msg + '\n';
     if (!_pdfLogTimer) _pdfLogTimer = setTimeout(pdfLogFlush, 50);
 }
-// v2.4.1: item-specific "No Faults" wording (preload is sandboxed, so the library lives here)
+// v2.4.2: item-specific "No Faults" wording (preload is sandboxed, so the library lives here)
 const inspectionPhrases = require('./inspection-phrases');
+function handleInspectionPhrases(req) {
+    if (!req) return null;
+    if (req.action === 'fill') {
+        const out = (req.labels || []).map(l => inspectionPhrases.phraseFor(l));
+        out.forEach((r, i) => {
+            let msg = 'no-faults fill #' + i + ' label=' + JSON.stringify(req.labels[i] || '') + ' -> ' + (r.rule || 'GENERIC');
+            if (!(req.labels[i]) && req.snippets && req.snippets[i]) msg += ' row=' + JSON.stringify(String(req.snippets[i]).slice(0, 160));
+            pdfLog(msg);
+        });
+        return out.map(r => r.text);
+    }
+    if (req.action === 'clear') return (req.values || []).map(v => inspectionPhrases.isGeneratedPhrase(v));
+    if (req.action === 'book') {
+        const sentences = inspectionPhrases.RULES.map(r => r.text).concat(inspectionPhrases.LEGACY || []).concat([inspectionPhrases.GENERIC]);
+        return { generic: inspectionPhrases.GENERIC, sentences };
+    }
+    if (req.action === 'log') {
+        pdfLog(String(req.message || ''));
+        return true;
+    }
+    return null;
+}
+ipcMain.handle('inspection-phrases', (event, req) => {
+    try { return handleInspectionPhrases(req); }
+    catch (e) { pdfLog('inspection-phrases error: ' + (e && e.message)); return null; }
+});
 ipcMain.on('inspection-phrases', (event, req) => {
-    try {
-        if (req && req.action === 'fill') {
-            const out = (req.labels || []).map(l => inspectionPhrases.phraseFor(l));
-            out.forEach((r, i) => {
-                let msg = 'no-faults fill #' + i + ' label=' + JSON.stringify(req.labels[i] || '') + ' -> ' + (r.rule || 'GENERIC');
-                if (!(req.labels[i]) && req.snippets && req.snippets[i]) msg += ' row=' + JSON.stringify(String(req.snippets[i]).slice(0, 160));
-                pdfLog(msg);
-            });
-            event.returnValue = out.map(r => r.text);
-        } else if (req && req.action === 'clear') {
-            event.returnValue = (req.values || []).map(v => inspectionPhrases.isGeneratedPhrase(v));
-        } else if (req && req.action === 'log') {
-            pdfLog(String(req.message || ''));
-            event.returnValue = true;
-        } else event.returnValue = null;
-    } catch (e) { pdfLog('inspection-phrases error: ' + (e && e.message)); event.returnValue = null; }
+    try { event.returnValue = handleInspectionPhrases(req); }
+    catch (e) { pdfLog('inspection-phrases error: ' + (e && e.message)); event.returnValue = null; }
+});
+ipcMain.on('inspection-phrases-log', (event, batch) => {
+    (Array.isArray(batch) ? batch : [batch]).forEach(m => pdfLog(String(m || '')));
 });
 ipcMain.on('get-pdf-hook', (event) => { event.returnValue = PDF_HOOK_SRC; });
 

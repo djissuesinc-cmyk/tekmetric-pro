@@ -98,4 +98,10 @@ assert.ok(!p.isUsefulLabel('Add Finding'));
 assert.ok(p.isUsefulLabel('Front Brakes'));
 assert.ok(p.isUsefulLabel('WARNING LIGHTS ON DASH'));
 
+// glued "Add finding" (live Tekmetric concatenates it onto the task name)
+assert.equal(p.cleanLabel('WARNING LIGHTS ON DASHAdd finding'), 'WARNING LIGHTS ON DASH');
+assert.equal(p.phraseFor('HORNAdd finding').rule, 'HORN');
+assert.equal(p.phraseFor('WARNING LIGHTS ON DASHAdd finding').rule, 'WARNING LIGHTS ON DASH');
+assert.equal(p.phraseFor('HORNAdd finding').text, p.phraseFor('HORN').text);
+
 console.log('PHRASES UNIT OK (' + p.RULES.length + ' rules, ' + Object.keys(SHOP).length + ' shop items)');

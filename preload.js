@@ -1,4 +1,4 @@
-const { ipcRenderer } = require('electron');
+const { ipcRenderer, webFrame } = require('electron');
 
 const urlParams = new URLSearchParams(window.location.search);
 const hiddenCopies = parseInt(urlParams.get('copies')) || 1;
@@ -75,76 +75,195 @@ ipcRenderer.on('settings-changed', (event, newSettings) => {
     toggleSidebarVisibility();
 });
 
-// v2.4.1: "No Faults" fills each inspection row: rate green, open "Add Finding" if needed,
-// write item-specific wording. Labels come from the task-name cell in the same row
-// (Tekmetric does not put the name on the textarea via <label>/aria/placeholder).
+// v2.4.2: Fill "No Faults" — scoped to the inspection card, non-blocking, Rate All via
+// MUI mousedown + portal menu, Add Finding field detected via focus/new nodes/portals.
 const NF_GENERIC = 'No faults found at this time.';
 const NF_CLICK = 'button, a, [role="button"], [role="radio"], [role="menuitem"], [role="option"], [role="tab"], input[type="button"], input[type="radio"], input[type="checkbox"]';
 const NF_FIELD = 'textarea, input[type="text"], input[type="search"], input:not([type]), [contenteditable="true"], [contenteditable=""]';
 const NF_RATE_ARIA = /checked|okay|\bok\b|attention|immediate|not applicable|n\/a|pass|fail|good|fair|poor|satisfactory|green|yellow|red|warning|needs?\s*(work|attention)|approved/i;
-const NF_SKIP_TEXT = /^(notes?|findings?|comments?|recommendations?|technician notes?|tech notes?|add (a )?(note|finding|comment)s?|details?|description|good|fair|poor|ok|pass(ed)?|fail(ed)?|green|yellow|red|needs attention|attention|urgent|not inspected|n\/a|na|none|inspection|inspections|status|condition|select|save|cancel|edit|delete|remove|photo|photos|video|media|upload|rating|inspection task|rate all tasks|checked\s*(&|and)\s*okay|requires attention soon|requires immediate attention|not applicable|type here.*|enter .*|write .*)$/i;
-const NF_SECTION = /^(interior|exterior|under hood|starting\/?charging(\s+system)?|steering and suspension|brakes|under vehicle|fluid leaks\s*\(\s*general\s*\)|other faults not listed|30 point vehicle inspection|rate all tasks)$/i;
+const NF_SKIP_TEXT = /^(notes?|findings?|comments?|recommendations?|technician notes?|tech notes?|add (a )?(note|finding|comment)s?|details?|description|good|fair|poor|ok|pass(ed)?|fail(ed)?|green|yellow|red|needs attention|attention|urgent|not inspected|n\/a|na|none|inspection|inspections|status|condition|select|save|cancel|edit|delete|remove|photo|photos|video|media|upload|rating|inspection task|rate all tasks|checked\s*(&|and)\s*okay|requires attention soon|requires immediate attention|not applicable|type here.*|enter .*|write .*|search tekmetric.*|search)$/i;
+const NF_SECTION = /^(interior|exterior|under hood|starting\/?charging(\s+system)?|steering and suspension|brakes|under vehicle|fluid leaks\s*\(\s*general\s*\)|other faults not listed|30 point vehicle inspection|rate all tasks|concerns?|customer concerns?)$/i;
+const NF_CARD_RE = /rate all tasks|30\s*point\s*(vehicle\s*)?inspection|\binspection task\b/i;
+const NF_GREEN_RE = /checked\s*(&|and)?\s*ok(ay)?|\bokay\b|\bgood\b|\bpass(ed)?\b|\bgreen\b|\bcheck(ed)?\b/i;
+const NF_MENU_SEL = '[role="listbox"], [role="menu"], .MuiMenu-list, .MuiList-root[role], ul.MuiMenu-list, .MuiPopover-root [role="listbox"], .MuiModal-root [role="listbox"]';
+const NF_PORTAL_SEL = '.MuiPopover-root, .MuiModal-root, .MuiDialog-root, .MuiPopper-root, [role="dialog"], [role="presentation"] .MuiPaper-root';
 
 let nfBusy = false;
+let nfSuppressAutoCaps = false;
+let nfBook = null;
+let nfLogBuf = [];
+let nfLogTimer = null;
+let nfMaxSlice = 0;
+let nfSliceStart = 0;
 
 function nfSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function nfMarkSlice() {
+    const n = performance.now() - nfSliceStart;
+    if (n > nfMaxSlice) nfMaxSlice = n;
+}
+
+async function nfYield() {
+    nfMarkSlice();
+    await new Promise(r => setTimeout(r, 0));
+    nfSliceStart = performance.now();
+}
 
 function nfLog(msg) {
     const line = String(msg || '');
     const out = line.startsWith('no-faults') ? line : ('no-faults ' + line);
     try { console.log('[tekpro-nf] ' + out); } catch (e) {}
-    try { ipcRenderer.sendSync('inspection-phrases', { action: 'log', message: out }); } catch (e) {}
+    nfLogBuf.push(out);
+    if (!nfLogTimer) nfLogTimer = setTimeout(nfLogFlush, 40);
 }
 
-function nfSnippet(el, n) {
-    const t = ((el && (el.innerText || el.textContent)) || '').replace(/\s+/g, ' ').trim();
-    return t.slice(0, n || 160);
+function nfLogFlush() {
+    nfLogTimer = null;
+    if (!nfLogBuf.length) return;
+    const batch = nfLogBuf.splice(0, nfLogBuf.length);
+    try { ipcRenderer.send('inspection-phrases-log', batch); } catch (e) {}
 }
 
-function nfWait(fn, timeout, interval) {
-    timeout = timeout == null ? 2000 : timeout;
-    interval = interval == null ? 50 : interval;
-    return new Promise(resolve => {
-        const start = Date.now();
-        let obs = null;
-        let finished = false;
-        const done = (v) => {
-            if (finished) return;
-            finished = true;
-            try { if (obs) obs.disconnect(); } catch (e) {}
-            resolve(v);
-        };
-        const tick = () => {
-            if (finished) return;
-            try {
-                const v = fn();
-                if (v) return done(v);
-            } catch (e) {}
-            if (Date.now() - start >= timeout) return done(null);
-            setTimeout(tick, interval);
-        };
-        try {
-            obs = new MutationObserver(() => tick());
-            if (document.body) obs.observe(document.body, { childList: true, subtree: true, attributes: true });
-        } catch (e) {}
-        tick();
-    });
-}
-
-function nfClick(el) {
-    if (!el) return;
-    try { el.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) {}
-    try { if (typeof el.focus === 'function') el.focus(); } catch (e) {}
-    try { el.click(); } catch (e) {
-        try {
-            const opts = { bubbles: true, cancelable: true, view: window };
-            el.dispatchEvent(new MouseEvent('pointerdown', opts));
-            el.dispatchEvent(new MouseEvent('mousedown', opts));
-            el.dispatchEvent(new MouseEvent('pointerup', opts));
-            el.dispatchEvent(new MouseEvent('mouseup', opts));
-            el.dispatchEvent(new MouseEvent('click', opts));
-        } catch (e2) {}
+async function nfInvoke(req) {
+    try { return await ipcRenderer.invoke('inspection-phrases', req); }
+    catch (e) {
+        try { return ipcRenderer.sendSync('inspection-phrases', req); }
+        catch (e2) { nfLog('ipc error: ' + (e && e.message)); return null; }
     }
+}
+
+async function nfLoadBook() {
+    if (nfBook) return nfBook;
+    const b = await nfInvoke({ action: 'book' });
+    const sentences = new Set(((b && b.sentences) || []).map(nfNorm));
+    sentences.add(nfNorm(NF_GENERIC));
+    nfBook = { generic: nfNorm((b && b.generic) || NF_GENERIC), sentences };
+    return nfBook;
+}
+
+function nfNorm(s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().toLowerCase(); }
+
+function nfIsGenerated(value) {
+    const raw = String(value == null ? '' : value).replace(/\r\n?/g, '\n').trim();
+    if (!raw) return false;
+    const n = nfNorm(raw);
+    if (n === nfNorm(NF_GENERIC)) return true;
+    if (nfBook) {
+        if (n === nfBook.generic || nfBook.sentences.has(n)) return true;
+        const nl = raw.indexOf('\n');
+        if (nl >= 0) {
+            const body = nfNorm(raw.slice(nl + 1));
+            if (nfBook.sentences.has(body) || body === nfBook.generic) return true;
+        }
+    }
+    return false;
+}
+
+function nfOwnTextCheap(el, max) {
+    if (!el) return '';
+    let s = '';
+    const cap = max || 80;
+    const walk = (node, depth) => {
+        if (s.length >= cap || depth > 4) return;
+        if (node.nodeType === 3) { s += node.nodeValue; return; }
+        if (node.nodeType !== 1) return;
+        try { if (node.matches && node.matches('script,style,svg,textarea,input,select,img')) return; } catch (e) {}
+        const kids = node.childNodes;
+        for (let i = 0; i < kids.length; i++) walk(kids[i], depth + 1);
+    };
+    walk(el, 0);
+    return s.replace(/\s+/g, ' ').trim();
+}
+
+function nfFindText(root, re, maxVisit) {
+    const hits = [];
+    if (!root) return hits;
+    try {
+        const tw = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+        let n, visits = 0, cap = maxVisit || 6000;
+        while ((n = tw.nextNode()) && visits++ < cap) {
+            const t = n.nodeValue;
+            if (t && re.test(t)) hits.push(n);
+        }
+    } catch (e) {}
+    return hits;
+}
+
+function nfHtmlSnippet(el, n) {
+    if (!el) return '';
+    try {
+        // Shallow only — el.outerHTML on a large tree (the card, the body) would freeze the renderer.
+        const open = el.cloneNode(false);
+        const kids = [];
+        const max = Math.min(el.children ? el.children.length : 0, 4);
+        for (let i = 0; i < max; i++) {
+            const c = el.children[i];
+            kids.push((c.tagName || '') + (c.id ? '#' + c.id : '') + (typeof c.className === 'string' && c.className ? '.' + c.className.split(/\s+/)[0] : ''));
+        }
+        const text = nfOwnTextCheap(el, 80);
+        return ((open.outerHTML || el.tagName) + ' kids[' + (el.children ? el.children.length : 0) + ']=' + kids.join(',') + ' text=' + JSON.stringify(text)).replace(/\s+/g, ' ').slice(0, n || 300);
+    } catch (e) { return (el.tagName || '') + ''; }
+}
+
+function nfDescribe(el) {
+    if (!el || !el.tagName) return String(el == null ? '' : el);
+    const cls = (typeof el.className === 'string' ? el.className : '').split(/\s+/).filter(Boolean).slice(0, 4).join('.');
+    return el.tagName.toLowerCase()
+        + (el.id ? '#' + el.id : '')
+        + (cls ? '.' + cls : '')
+        + ' role=' + (el.getAttribute('role') || '-')
+        + ' aria=' + (el.getAttribute('aria-label') || el.getAttribute('aria-haspopup') || '-')
+        + ' ph=' + (el.getAttribute('placeholder') || '-')
+        + ' kids=' + (el.children ? el.children.length : 0);
+}
+
+function nfIsVisible(el) {
+    if (!el || !el.getBoundingClientRect) return false;
+    try {
+        const r = el.getBoundingClientRect();
+        if (r.width < 2 && r.height < 2) return false;
+        const s = window.getComputedStyle(el);
+        if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
+    } catch (e) { return true; }
+    return true;
+}
+
+function nfIsSearchBox(el) {
+    if (!el) return false;
+    const bits = [
+        el.getAttribute && el.getAttribute('placeholder'),
+        el.getAttribute && el.getAttribute('aria-label'),
+        el.getAttribute && el.getAttribute('title'),
+        el.getAttribute && el.getAttribute('name'),
+        el.id, el.className
+    ].join(' ');
+    if (/search/i.test(bits)) return true;
+    try { if (el.closest && el.closest('header, [role="banner"], [role="search"], nav')) return true; } catch (e) {}
+    return false;
+}
+
+function nfIsConcernsRow(row) {
+    if (!row) return false;
+    const t = nfOwnTextCheap(row, 160);
+    // Live Concerns rows have "Add media" and "Edit" next to "Add finding". Inspection rows do not.
+    if (/add\s*media/i.test(t)) return true;
+    try {
+        // Only look at a tight neighbourhood (previous siblings / parent heading).
+        // Do NOT querySelector a heading anywhere in body — that would match the
+        // page's "Concerns" section and reject every inspection row.
+        let el = row;
+        for (let i = 0; i < 3 && el && el !== document.body && el !== document.documentElement; i++) {
+            for (const c of el.children || []) {
+                if (/^H[1-6]$/.test(c.tagName) || (c.getAttribute && c.getAttribute('role') === 'heading')) {
+                    if (/^concerns?$|^customer concerns?$/i.test(nfOwnTextCheap(c, 40))) return true;
+                }
+            }
+            const prev = el.previousElementSibling;
+            if (prev && /^concerns?$|^customer concerns?$/i.test(nfOwnTextCheap(prev, 40))) return true;
+            el = el.parentElement;
+        }
+    } catch (e) {}
+    return false;
 }
 
 function nfIsContentEditable(el) {
@@ -165,6 +284,7 @@ function nfIsField(el) {
     if (el.disabled || el.readOnly) return false;
     const type = (el.type || '').toLowerCase();
     if (['button', 'submit', 'checkbox', 'radio', 'hidden', 'file', 'password', 'color', 'range', 'number', 'date', 'email'].includes(type)) return false;
+    if (nfIsSearchBox(el)) return false;
     if (el.matches && el.matches(NF_FIELD)) return true;
     return nfIsContentEditable(el);
 }
@@ -175,31 +295,87 @@ function nfFields(root) {
     return Array.from(scope.querySelectorAll(NF_FIELD)).filter(nfIsField);
 }
 
-function nfClickables(root) {
-    if (!root || !root.querySelectorAll) return [];
-    return Array.from(root.querySelectorAll(NF_CLICK));
+function nfVisibleFields(root) {
+    return nfFields(root).filter(nfIsVisible);
+}
+
+async function nfPointer(el) {
+    if (!el) return;
+    // Isolated-world dispatchEvent often does not reach page-world React/MUI listeners.
+    // Run the pointer sequence in the page world, then also call native click().
+    const mark = 'data-tekpro-nf-ptr';
+    try { el.setAttribute(mark, '1'); } catch (e) {}
+    try {
+        if (webFrame && typeof webFrame.executeJavaScript === 'function') {
+            await webFrame.executeJavaScript(`(() => {
+                const el = document.querySelector('[data-tekpro-nf-ptr="1"]');
+                if (!el) return 'no-el';
+                el.removeAttribute('data-tekpro-nf-ptr');
+                try { el.focus(); } catch (e) {}
+                const r = el.getBoundingClientRect();
+                const cx = r.left + Math.max(4, Math.min(r.width, 24) / 2);
+                const cy = r.top + Math.max(4, Math.min(r.height, 24) / 2);
+                const down = { bubbles: true, cancelable: true, composed: true, view: window, button: 0, buttons: 1, clientX: cx, clientY: cy };
+                try { el.dispatchEvent(new PointerEvent('pointerdown', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, down))); } catch (e) {}
+                try { el.dispatchEvent(new MouseEvent('mousedown', down)); } catch (e) {}
+                try { el.dispatchEvent(new PointerEvent('pointerup', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true, buttons: 0 }, down))); } catch (e) {}
+                try { el.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, down, { buttons: 0 }))); } catch (e) {}
+                try { el.dispatchEvent(new MouseEvent('click', Object.assign({}, down, { buttons: 0 }))); } catch (e) { try { el.click(); } catch (e2) {} }
+                return 'ok';
+            })()`);
+        } else {
+            try { el.removeAttribute(mark); } catch (e) {}
+            try { el.click(); } catch (e) {}
+        }
+    } catch (e) {
+        try { el.removeAttribute(mark); } catch (e2) {}
+        try { el.click(); } catch (e3) {}
+    }
+    nfSliceStart = performance.now();
+}
+
+function nfWait(fn, timeout, interval) {
+    timeout = timeout == null ? 500 : timeout;
+    interval = interval == null ? 40 : interval;
+    return new Promise(resolve => {
+        const start = Date.now();
+        const tick = () => {
+            nfSliceStart = performance.now();
+            try {
+                const v = fn();
+                if (v) { nfSliceStart = performance.now(); return resolve(v); }
+            } catch (e) {}
+            if (Date.now() - start >= timeout) { nfSliceStart = performance.now(); return resolve(null); }
+            setTimeout(tick, interval);
+        };
+        tick();
+    });
 }
 
 function nfLooksLikeRating(el) {
-    const t = ((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('data-testid') || '') + ' ' + (el.textContent || '')).replace(/\s+/g, ' ').trim();
+    const t = ((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('data-testid') || '') + ' ' + nfOwnTextCheap(el, 40)).replace(/\s+/g, ' ').trim();
     return NF_RATE_ARIA.test(t);
 }
 
+// Shallow: group clickable children by parent. If root is huge (the whole card),
+// bail with a "many" signal so we do not treat the card as a single row.
 function nfRatingClusters(root) {
-    if (!root) return [];
-    const clicks = nfClickables(root);
+    if (!root || !root.querySelectorAll) return [];
+    let btns;
+    try { btns = root.querySelectorAll('button, [role="button"], [role="radio"]'); } catch (e) { return []; }
+    if (btns.length > 160) return [{ many: true }, { many: true }];
     const groups = new Map();
-    for (const c of clicks) {
+    for (const c of btns) {
         const p = c.parentElement;
         if (!p) continue;
         if (!groups.has(p)) groups.set(p, []);
         groups.get(p).push(c);
     }
     const out = [];
-    for (const [p, btns] of groups) {
-        if (btns.length < 3 || btns.length > 6) continue;
-        const ratingish = btns.filter(b => nfLooksLikeRating(b) || ((b.textContent || '').trim().length <= 2));
-        if (ratingish.length >= 3 || btns.length === 4) out.push({ parent: p, buttons: btns });
+    for (const [p, list] of groups) {
+        if (list.length < 3 || list.length > 6) continue;
+        const ratingish = list.filter(b => nfLooksLikeRating(b) || (nfOwnTextCheap(b, 8).length <= 2));
+        if (ratingish.length >= 3 || list.length === 4) out.push({ parent: p, buttons: list });
     }
     return out;
 }
@@ -218,48 +394,66 @@ function nfIsSelected(btn) {
     if (attrs.some(a => a && /^(false|off|unchecked)$/i.test(a))) return false;
     const cls = (typeof btn.className === 'string' ? btn.className : (btn.className && btn.className.baseVal) || '').toLowerCase();
     if (/\b(selected|active|checked|mui-selected|mui-checked|is-selected|is-checked|is-active)\b/.test(cls)) return true;
+    try {
+        const s = window.getComputedStyle(btn);
+        const m = (s.backgroundColor || '').match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+        if (m) {
+            const r = +m[1], g = +m[2], b = +m[3], a = (s.backgroundColor || '').includes('rgba') ? parseFloat((s.backgroundColor.split(',')[3] || '1')) : 1;
+            // Filled green (not a transparent / outline-only button)
+            if (a > 0.4 && g > 100 && g > r * 1.15 && g > b * 1.15) return true;
+        }
+        const svg = btn.querySelector && btn.querySelector('svg, path, circle');
+        if (svg) {
+            const f = (window.getComputedStyle(svg).fill || svg.getAttribute('fill') || '');
+            const m2 = f.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+            if (m2) {
+                const r = +m2[1], g = +m2[2], b = +m2[3];
+                if (g > 100 && g > r * 1.15 && g > b * 1.15) return true;
+            }
+        }
+    } catch (e) {}
     return false;
-}
-
-function nfInnermost(els) {
-    return els.filter(el => !els.some(o => o !== el && el.contains(o)));
 }
 
 function nfFindAddFinding(root) {
     if (!root || !root.querySelectorAll) return null;
-    const els = Array.from(root.querySelectorAll('a, button, span, div, p, [role="button"], [role="link"]'));
-    const exact = nfInnermost(els.filter(el => /^add finding$/i.test((el.textContent || '').replace(/\s+/g, ' ').trim())));
-    if (exact.length) return exact[0];
-    const loose = nfInnermost(els.filter(el => {
-        const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
-        return /add finding/i.test(t) && t.length < 40;
-    }));
-    return loose[0] || null;
+    let els;
+    try { els = root.querySelectorAll('a, button, [role="button"], [role="link"]'); } catch (e) { return null; }
+    let exact = null, loose = null;
+    for (const el of els) {
+        const t = nfOwnTextCheap(el, 40);
+        if (/^add finding$/i.test(t)) { exact = el; break; }
+        if (!loose && /add finding/i.test(t) && t.length < 40) loose = el;
+    }
+    return exact || loose;
 }
 
-function nfClosestRow(start) {
+// Climb until the ancestor contains BOTH a rating cluster and the start node.
+// Do not stop at an inner [role=row] / tr that only has the name + "Add finding".
+function nfClosestRow(start, card) {
     if (!start) return null;
-    try {
-        if (start.closest) {
-            const tr = start.closest('tr, [role="row"]');
-            if (tr && tr !== document.body && (nfRatingClusters(tr).length === 1 || (tr.children && tr.children.length >= 3))) return tr;
-        }
-    } catch (e) {}
     let el = start;
-    for (let i = 0; i < 18 && el && el !== document.documentElement; i++) {
-        const p = el.parentElement;
-        if (!p || p === document.body || p === document.documentElement || p === document.head) break;
+    for (let i = 0; i < 20 && el && el !== document.documentElement; i++) {
+        const p = el.parentElement || el;
+        if (!p || p === document.body || p === document.documentElement) break;
+        if (card && p !== card && !card.contains(p)) break;
         const clusters = nfRatingClusters(p);
-        if (clusters.length === 1 && p.children && p.children.length >= 2) return p;
+        if (clusters.length === 1 && !clusters[0].many && p.children && p.children.length >= 2) return p;
+        if (clusters.length > 1 || (clusters[0] && clusters[0].many)) {
+            // Walked past a single row into the card — give up rather than returning the card.
+            break;
+        }
+        if (p === card) break;
         el = p;
     }
-    try { return start.closest('tr, [role="row"]') || null; } catch (e) { return null; }
+    return null;
 }
 
 function nfStripNoise(s) {
     return String(s || '')
-        .replace(/\badd finding\b/ig, ' ')
-        .replace(/\b(rating|inspection task|findings)\b/ig, ' ')
+        .replace(/add\s*finding/ig, ' ')
+        .replace(/add\s*media/ig, ' ')
+        .replace(/\b(rating|inspection task|findings|edit)\b/ig, ' ')
         .replace(/\s+/g, ' ')
         .trim();
 }
@@ -268,54 +462,50 @@ function nfCellText(el, field) {
     if (!el) return '';
     let t = '';
     const skip = 'button, textarea, input, select, svg, script, style, img, [role="button"], [role="radio"], [role="menuitem"], [contenteditable], [contenteditable="true"]';
-    const walk = (n) => {
-        if (!n) return;
+    const walk = (n, depth) => {
+        if (!n || depth > 12 || t.length > 200) return;
         if (n === field) return;
-        if (n.nodeType === 3) { t += n.textContent; return; }
+        if (n.nodeType === 3) { t += n.nodeValue; return; }
         if (n.nodeType !== 1) return;
         try { if (n.matches && n.matches(skip)) return; } catch (e) {}
-        for (const c of n.childNodes) walk(c);
+        for (const c of n.childNodes) walk(c, depth + 1);
     };
-    walk(el);
+    walk(el, 0);
     return nfStripNoise(t);
 }
 
 function nfCleanLabel(t) {
     const s = nfStripNoise(t).replace(/[:*\u2022\-–—\s]+$/, '').replace(/^[\d.)\s\-–—\u2022]+(?=[a-z])/i, '').trim();
     if (s.length < 2 || s.length > 120 || !/[a-z]/i.test(s) || NF_SKIP_TEXT.test(s) || NF_SECTION.test(s)) return '';
+    if (/^search\b/i.test(s)) return '';
     return s;
 }
 
-// Walk up from the field to the row (ancestor that also has the rating buttons / several cells),
-// then read the task-name cell — the cell between ratings and findings, excluding field and button text.
 function getInspectionLabel(ta, rowHint) {
     try {
         const direct = [];
-        const lb = ta && ta.getAttribute && ta.getAttribute('aria-labelledby');
-        if (lb) direct.push(lb.split(/\s+/).map(id => { const e = document.getElementById(id); return e ? e.textContent : ''; }).join(' '));
         if (ta && ta.getAttribute) {
+            const lb = ta.getAttribute('aria-labelledby');
+            if (lb) direct.push(lb.split(/\s+/).map(id => { const e = document.getElementById(id); return e ? nfOwnTextCheap(e, 80) : ''; }).join(' '));
             direct.push(ta.getAttribute('aria-label'));
-            if (ta.id) { try { const l = document.querySelector('label[for="' + CSS.escape(ta.id) + '"]'); if (l) direct.push(l.textContent); } catch (e) {} }
-            const wrap = ta.closest && ta.closest('label');
-            if (wrap) direct.push((wrap.textContent || '').replace(nfFieldValue(ta), ''));
+            if (ta.id) { try { const l = document.querySelector('label[for="' + CSS.escape(ta.id) + '"]'); if (l) direct.push(nfOwnTextCheap(l, 80)); } catch (e) {} }
             direct.push(ta.getAttribute('placeholder'), ta.getAttribute('title'), ta.getAttribute('name'));
         }
-        for (const d of direct) { const c = nfCleanLabel(d); if (c && !/^add finding$/i.test(c)) return c; }
+        for (const d of direct) { const c = nfCleanLabel(d); if (c && !/^add finding$/i.test(c) && !/^search\b/i.test(c)) return c; }
 
-        const row = rowHint || nfClosestRow(ta);
+        const row = rowHint;
         if (row) {
             const kids = Array.from(row.children);
             const clusters = nfRatingClusters(row);
             const rateEl = clusters[0] && clusters[0].parent;
             const findingIdx = kids.findIndex(k => (ta && k.contains(ta)) || nfFindAddFinding(k) || (k.querySelector && k.querySelector(NF_FIELD)));
-            const rateIdx = rateEl ? kids.findIndex(k => k === rateEl || k.contains(rateEl)) : -1;
             const candidates = [];
             kids.forEach((k, i) => {
                 if (i === findingIdx) return;
                 const text = nfCleanLabel(nfCellText(k, ta));
                 if (text) candidates.push(text);
             });
-            // If ratings and the name share a child (rateIdx), that child's text (buttons already stripped) is the name.
+            const rateIdx = rateEl ? kids.findIndex(k => k === rateEl || k.contains(rateEl)) : -1;
             if (rateIdx >= 0 && rateIdx !== findingIdx) {
                 const shared = nfCleanLabel(nfCellText(kids[rateIdx], ta));
                 if (shared) candidates.unshift(shared);
@@ -328,31 +518,81 @@ function getInspectionLabel(ta, rowHint) {
     return '';
 }
 
-function nfFindRows() {
+function nfLooksLikeCard(el) {
+    if (!el || el === document.body || el === document.documentElement) return false;
+    // A card is the smallest ancestor of "Rate All Tasks" / "30 POINT..." that has
+    // several inspection rows: 3+ "Add finding" buttons OR 3+ rating clusters.
+    // Do not require "Add finding" — some sheets already have open textareas.
+    const clusters = nfRatingClusters(el);
+    if (clusters.length >= 3 || (clusters[0] && clusters[0].many)) return true;
+    let adds = 0;
+    let btns;
+    try { btns = el.querySelectorAll('button, a, [role="button"], [role="link"]'); } catch (e) { return false; }
+    if (btns.length > 800) return false;
+    for (const b of btns) {
+        if (/^add finding$/i.test(nfOwnTextCheap(b, 32))) {
+            adds++;
+            if (adds >= 3) return true;
+        }
+    }
+    return false;
+}
+
+function nfFindCard() {
+    const hits = nfFindText(document.body, NF_CARD_RE, 8000);
+    let best = null, bestSize = Infinity;
+    for (const tn of hits) {
+        let el = tn.parentElement;
+        for (let i = 0; i < 16 && el && el !== document.body; i++) {
+            if (nfLooksLikeCard(el)) {
+                let size = 0;
+                try { size = el.querySelectorAll('button, a, [role="button"]').length; } catch (e) { size = 9999; }
+                if (size < bestSize && size >= 4) { best = el; bestSize = size; }
+                break;
+            }
+            el = el.parentElement;
+        }
+    }
+    return best;
+}
+
+function nfFindRows(card) {
+    const root = card || document.body;
     const starts = [];
-    nfFields(document).forEach(el => starts.push(el));
-    const adds = [];
+    // Only start from Add-finding controls and finding fields INSIDE the card.
+    // Never from the global search box or other page inputs.
     try {
-        Array.from(document.querySelectorAll('a, button, span, div, [role="button"], [role="link"]')).forEach(el => {
-            const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
-            if (/^add finding$/i.test(t)) adds.push(el);
-        });
+        const adds = root.querySelectorAll('a, button, [role="button"], [role="link"]');
+        for (const el of adds) {
+            if (/^add finding$/i.test(nfOwnTextCheap(el, 32))) starts.push(el);
+        }
     } catch (e) {}
-    nfInnermost(adds).forEach(el => {
-        // Skip if this Add Finding is already inside a row we'll pick up from a field
-        starts.push(el);
+    nfFields(root).forEach(el => {
+        if (!nfIsSearchBox(el)) starts.push(el);
     });
     const rows = [];
     const seen = new Set();
     for (const s of starts) {
-        const row = nfClosestRow(s);
+        const row = nfClosestRow(s, card);
         if (!row) continue;
         if (seen.has(row)) continue;
+        if (nfIsConcernsRow(row)) continue;
+        if (card && !card.contains(row) && row !== card) continue;
         seen.add(row);
         rows.push(row);
     }
     rows.sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1);
     return rows;
+}
+
+function nfLogRowChain(row, tag) {
+    try {
+        let el = row;
+        for (let i = 0; i < 6 && el && el !== document.documentElement; i++) {
+            nfLog((tag || 'row-chain') + ' #' + i + ' ' + nfDescribe(el) + ' ratings=' + nfRatingClusters(el).length + ' html=' + JSON.stringify(nfHtmlSnippet(el, 300)));
+            el = el.parentElement;
+        }
+    } catch (e) { nfLog('row-chain error: ' + (e && e.message)); }
 }
 
 async function nfSetValue(el, val) {
@@ -363,9 +603,9 @@ async function nfSetValue(el, val) {
             try { el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: val, inputType: 'insertText' })); }
             catch (e) { el.dispatchEvent(new Event('input', { bubbles: true, composed: true })); }
             el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-            await nfSleep(80);
+            await nfSleep(40);
             try { el.blur(); } catch (e) {}
-            await nfSleep(80);
+            await nfSleep(40);
             return;
         }
         const lastValue = el.value;
@@ -377,36 +617,93 @@ async function nfSetValue(el, val) {
         if (el._valueTracker) el._valueTracker.setValue(lastValue);
         el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
         el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-        await nfSleep(80);
+        await nfSleep(40);
         try { el.blur(); } catch (e) {}
-        await nfSleep(80);
+        await nfSleep(40);
     } catch (e) {
         nfLog('set-value error: ' + (e && e.message));
     }
 }
 
-function nfInnermostText(root, re, maxLen) {
-    if (!root || !root.querySelectorAll) return null;
-    const els = Array.from(root.querySelectorAll('a, button, span, div, p, li, label, select, option, [role="button"], [role="menuitem"], [role="option"], [role="link"]'));
-    const hits = els.filter(el => {
-        const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!re.test(t)) return false;
-        if (maxLen && t.length > maxLen) return false;
-        return true;
-    });
-    hits.sort((a, b) => ((a.textContent || '').length) - ((b.textContent || '').length));
-    return hits[0] || null;
+function nfAssociatedControl(from) {
+    if (!from) return null;
+    const sel = 'select, [role="button"][aria-haspopup], [aria-haspopup="listbox"], [aria-haspopup="true"], [aria-haspopup="menu"], [class*="MuiSelect"], [class*="MuiInputBase-root"]';
+    let el = from;
+    for (let i = 0; i < 8 && el; i++) {
+        try {
+            if (el.matches && el.matches(sel)) return el;
+            if (el.tagName === 'BUTTON' || (el.getAttribute && el.getAttribute('role') === 'button')) return el;
+            const inner = el.querySelector && el.querySelector(sel);
+            if (inner) return inner;
+            const sibs = [el.nextElementSibling, el.previousElementSibling];
+            for (const sib of sibs) {
+                if (!sib) continue;
+                if (sib.matches && sib.matches(sel)) return sib;
+                const sInner = sib.querySelector && sib.querySelector(sel);
+                if (sInner) return sInner;
+            }
+        } catch (e) {}
+        el = el.parentElement;
+    }
+    return from.closest && (from.closest('button, [role="button"], [aria-haspopup], select')) || from;
 }
 
-async function nfRateAllGreen() {
-    const control = nfInnermostText(document.body, /rate all tasks/i, 60);
+function nfFindRateAllControl(card) {
+    const root = card || document.body;
+    const info = { how: '', tag: '', role: '', text: '', aria: '', haspopup: '' };
+    // 1) Text "Rate All Tasks" anywhere in the card (or page, if no card).
+    const hits = nfFindText(root, /rate all tasks/i, 6000);
+    if (hits.length) {
+        const node = hits[0];
+        const host = node.parentElement || node;
+        const control = nfAssociatedControl(host);
+        info.how = 'text-node';
+        if (control) {
+            info.tag = control.tagName;
+            info.role = control.getAttribute('role') || '';
+            info.text = nfOwnTextCheap(control, 80) || nfOwnTextCheap(host, 80);
+            info.aria = control.getAttribute('aria-label') || '';
+            info.haspopup = control.getAttribute('aria-haspopup') || '';
+            return { control, info };
+        }
+    }
+    // 2) aria-label / placeholder / title on a compact set of controls
+    try {
+        const cands = (root).querySelectorAll('button, [role="button"], [aria-haspopup], select, label, [class*="MuiSelect"], [class*="MuiInputBase"]');
+        for (const el of cands) {
+            const t = [
+                nfOwnTextCheap(el, 80),
+                el.getAttribute('aria-label'),
+                el.getAttribute('placeholder'),
+                el.getAttribute('title'),
+                el.getAttribute('name')
+            ].join(' ');
+            if (/rate all tasks/i.test(t)) {
+                const control = el.tagName === 'LABEL' ? nfAssociatedControl(el) : (el.matches('select, [role="button"], [aria-haspopup], button') ? el : nfAssociatedControl(el));
+                info.how = 'aria';
+                info.tag = (control || el).tagName;
+                info.role = (control || el).getAttribute('role') || '';
+                info.text = t.slice(0, 80);
+                info.aria = (control || el).getAttribute('aria-label') || '';
+                info.haspopup = (control || el).getAttribute('aria-haspopup') || '';
+                return { control: control || el, info };
+            }
+        }
+    } catch (e) {}
+    return { control: null, info: { how: 'not-found' } };
+}
+
+async function nfRateAllGreen(card) {
+    const found = nfFindRateAllControl(card);
+    const control = found.control;
+    nfLog('rate-all: ' + JSON.stringify(found.info) + (control ? ' desc=' + nfDescribe(control) : ''));
     if (!control) {
         nfLog('rate-all: control not found, will rate each row');
         return false;
     }
     const sel = (control.tagName === 'SELECT' ? control : (control.closest && control.closest('select')));
     if (sel && sel.options) {
-        const option = Array.from(sel.options).find(o => /checked\s*(&|and)?\s*okay|\bokay\b|checked/i.test(o.text));
+        const option = Array.from(sel.options).find(o => NF_GREEN_RE.test(o.text)) || Array.from(sel.options).find(o => /checked|okay|ok/i.test(o.text));
         if (option) {
             const last = sel.value;
             sel.value = option.value;
@@ -414,183 +711,277 @@ async function nfRateAllGreen() {
             sel.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
             sel.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
             nfLog('rate-all: set <select> to ' + JSON.stringify(option.text));
-            await nfSleep(200);
+            await nfSleep(80);
             return true;
         }
     }
-    const clickable = (control.closest && control.closest(NF_CLICK)) || control;
-    nfLog('rate-all: clicking control');
-    nfClick(clickable);
-    const opt = await nfWait(() => {
-        const els = Array.from(document.querySelectorAll('li, button, [role="menuitem"], [role="option"], [role="listitem"], label, span, div, a'));
-        const cands = els.filter(el => {
-            const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
-            if (t.length > 60 || t.length < 2) return false;
-            if (el === control || (control.contains && control.contains(el) && el !== clickable && t.toLowerCase() === (control.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase())) return false;
-            return /checked\s*(&|and)\s*okay/i.test(t) || /^checked\s*(&|and)?\s*ok(ay)?$/i.test(t);
-        });
-        cands.sort((a, b) => ((a.textContent || '').length) - ((b.textContent || '').length));
-        return cands[0] || null;
-    }, 2000);
-    if (opt) {
-        nfClick((opt.closest && opt.closest(NF_CLICK)) || opt);
-        nfLog('rate-all: chose green/okay ' + JSON.stringify((opt.textContent || '').replace(/\s+/g, ' ').trim()));
-        await nfSleep(250);
-        return true;
+    // MUI Select opens on mousedown (click alone is not enough). Full pointer sequence.
+    await nfPointer(control);
+    nfSliceStart = performance.now();
+    const menu = await nfWait(() => {
+        try {
+            const m = document.querySelector(NF_MENU_SEL);
+            if (m && !m.hidden && m.getAttribute('aria-hidden') !== 'true') return m;
+            const items = document.querySelectorAll('[role="menuitem"], [role="option"]');
+            for (const it of items) {
+                const p = it.parentElement;
+                if (!p || p.hidden || p.getAttribute('aria-hidden') === 'true') continue;
+                if (p === control || (control && control.contains(p))) continue;
+                return p;
+            }
+        } catch (e) {}
+        return null;
+    }, 600, 40);
+    if (menu) {
+        const options = Array.from(menu.querySelectorAll('[role="option"], [role="menuitem"], li, .MuiMenuItem-root'));
+        const optInfo = options.slice(0, 8).map(o => ({
+            text: nfOwnTextCheap(o, 60),
+            aria: o.getAttribute('aria-label') || '',
+            value: o.getAttribute('data-value') || o.getAttribute('data-val') || ''
+        }));
+        nfLog('rate-all: options=' + JSON.stringify(optInfo));
+        let chosen = options.find(o => NF_GREEN_RE.test(nfOwnTextCheap(o, 60) + ' ' + (o.getAttribute('aria-label') || '') + ' ' + (o.getAttribute('data-value') || '')));
+        if (!chosen && options[0]) {
+            chosen = options[0];
+            nfLog('rate-all: no text match, taking first option');
+        }
+        if (chosen) {
+            await nfPointer(chosen);
+            nfLog('rate-all: chose ' + JSON.stringify(nfOwnTextCheap(chosen, 60) || chosen.getAttribute('aria-label') || 'first'));
+            await nfSleep(80);
+            return true;
+        }
     }
-    nfLog('rate-all: menu opened but green option not found, snippet=' + JSON.stringify(nfSnippet(document.body)));
+    nfLog('rate-all: menu not found after pointer, html=' + JSON.stringify(nfHtmlSnippet(document.querySelector('.MuiPopover-root, .MuiModal-root, [role="presentation"]'), 200)));
     try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); } catch (e) {}
     return false;
 }
 
-function nfRateRowGreen(row) {
+async function nfRateRowGreen(row) {
     const clusters = nfRatingClusters(row);
-    if (!clusters.length) return 'no-ratings';
+    if (!clusters.length || clusters[0].many || !clusters[0].buttons) return 'no-ratings';
     const green = clusters[0].buttons[0];
     if (nfIsSelected(green)) return 'already-green';
-    nfClick(green);
+    await nfPointer(green);
+    nfSliceStart = performance.now();
     return 'clicked';
 }
 
-async function nfOpenFinding(row) {
-    let fields = nfFields(row);
-    if (fields.length) return fields[0];
+async function nfOpenFinding(row, diagnose) {
+    const existing = nfVisibleFields(row);
+    if (existing.length) return existing[0];
     const add = nfFindAddFinding(row);
-    if (!add) return null;
-    nfClick(add);
+    if (!add) {
+        if (diagnose) nfLog('add-finding: no button in row html=' + JSON.stringify(nfHtmlSnippet(row, 300)));
+        return null;
+    }
+    const before = new Set(document.querySelectorAll('textarea, input[type="text"], input:not([type]), [contenteditable="true"], [contenteditable=""]'));
+    const prevActive = document.activeElement;
+    await nfPointer(add);
+    nfSliceStart = performance.now();
     const field = await nfWait(() => {
-        const f = nfFields(row);
-        return f[0] || null;
-    }, 2500);
-    return field;
+        // 1) Whatever just received focus (portal editors typically focus the textarea).
+        const ae = document.activeElement;
+        if (ae && ae !== prevActive && nfIsField(ae) && !nfIsSearchBox(ae)) return ae;
+        // 2) Newly added fields anywhere (MUI portals attach to document.body).
+        let now;
+        try { now = document.querySelectorAll('textarea, input[type="text"], input:not([type]), [contenteditable="true"], [contenteditable=""]'); } catch (e) { now = []; }
+        for (const f of now) {
+            if (!before.has(f) && nfIsField(f) && !nfIsSearchBox(f)) return f;
+        }
+        // 3) Visible field inside a popover / dialog / presentation portal.
+        try {
+            const portals = document.querySelectorAll(NF_PORTAL_SEL);
+            for (const p of portals) {
+                const vis = nfVisibleFields(p);
+                for (const f of vis) { if (!nfIsSearchBox(f)) return f; }
+            }
+        } catch (e) {}
+        // 4) A field that just appeared in the (possibly expanded) row or its parent.
+        const nearby = nfVisibleFields(row).concat(row.parentElement ? nfVisibleFields(row.parentElement) : []);
+        for (const f of nearby) {
+            if (!before.has(f) && !nfIsSearchBox(f)) return f;
+        }
+        return null;
+    }, 500, 40);
+    if (!field && diagnose) {
+        const ae = document.activeElement;
+        let newDesc = [];
+        try {
+            document.querySelectorAll('textarea, input[type="text"], [contenteditable="true"]').forEach(f => {
+                if (!before.has(f)) newDesc.push(nfDescribe(f) + ' vis=' + nfIsVisible(f));
+            });
+        } catch (e) {}
+        nfLog('add-finding: no field after click. active=' + nfDescribe(ae) + ' new=' + JSON.stringify(newDesc).slice(0, 300)
+            + ' portal=' + JSON.stringify(nfHtmlSnippet(document.querySelector(NF_PORTAL_SEL), 300)));
+    }
+    return field || null;
 }
 
-function nfIsGenerated(value) {
-    let flags = null;
-    try { flags = ipcRenderer.sendSync('inspection-phrases', { action: 'clear', values: [value] }); } catch (e) {}
-    if (flags && flags[0] === true) return true;
-    return String(value || '').trim().toUpperCase() === NF_GENERIC.toUpperCase();
+function nfPauseWorld() {
+    nfSuppressAutoCaps = true;
+    try { if (typeof observer !== 'undefined' && observer && observer.disconnect) observer.disconnect(); } catch (e) {}
+}
+
+function nfResumeWorld() {
+    nfSuppressAutoCaps = false;
+    try { if (typeof observer !== 'undefined' && observer && document.body) observer.observe(document.body, { childList: true, subtree: true }); } catch (e) {}
 }
 
 async function fillNoFaults() {
-    if (nfBusy) return;
+    if (nfBusy) { nfLog('fill ignored, already running'); return; }
     nfBusy = true;
-    try { document.documentElement.dataset.tekproNf = 'running'; } catch (e) {}
+    nfMaxSlice = 0;
+    nfSliceStart = performance.now();
+    const t0 = performance.now();
+    const deadline = t0 + 15000;
+    nfPauseWorld();
+    try { document.documentElement.dataset.tekproNf = 'running'; document.documentElement.dataset.tekproNfMaxSlice = '0'; } catch (e) {}
     try {
+        await nfLoadBook();
         nfLog('fill start url=' + String(location.href || '').slice(0, 180));
-        const ratedAll = await nfRateAllGreen();
-        const rows = nfFindRows();
+        const card = nfFindCard();
+        nfLog('card=' + (card ? nfDescribe(card) : 'NOT FOUND') + (card ? ' html=' + JSON.stringify(nfHtmlSnippet(card, 200)) : ''));
+        const ratedAll = await nfRateAllGreen(card);
+        nfSliceStart = performance.now();
+        await nfYield();
+        const rows = nfFindRows(card);
         nfLog('fill rows=' + rows.length + ' rateAll=' + ratedAll);
         if (!rows.length) {
-            const nFields = nfFields(document).length;
-            nfLog('fill: no inspection rows found, fields=' + nFields + ' snippet=' + JSON.stringify(nfSnippet(document.body, 200)));
+            nfLog('fill: no inspection rows in card, aborting (will not touch search or concerns)');
             return;
         }
+        nfLogRowChain(rows[0], 'first-row');
         const labels = [];
         const snippets = [];
         for (const row of rows) {
-            const field = nfFields(row)[0] || null;
-            const label = getInspectionLabel(field, row);
-            labels.push(label);
-            snippets.push(nfSnippet(row, 160));
+            const field = nfVisibleFields(row)[0] || null;
+            labels.push(getInspectionLabel(field, row));
+            snippets.push(nfStripNoise(nfCellText(row, field)).slice(0, 160));
         }
         let texts = null;
-        try { texts = ipcRenderer.sendSync('inspection-phrases', { action: 'fill', labels, snippets }); } catch (e) {}
+        try { texts = await nfInvoke({ action: 'fill', labels, snippets }); } catch (e) {}
         let filled = 0, skipped = 0, failed = 0;
         for (let i = 0; i < rows.length; i++) {
+            if (performance.now() > deadline) { nfLog('fill timeout at row ' + i); break; }
+            await nfYield();
             const row = rows[i];
-            try { row.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) {}
             if (!ratedAll) {
-                const r = nfRateRowGreen(row);
+                const r = await nfRateRowGreen(row);
+                nfSliceStart = performance.now();
                 if (r !== 'already-green') nfLog('fill #' + i + ' rate-row=' + r);
             }
-
-            const existingField = nfFields(row)[0];
+            const existingField = nfVisibleFields(row)[0];
             const existing = existingField ? nfFieldValue(existingField) : '';
             if (existing && !nfIsGenerated(existing)) {
                 nfLog('fill #' + i + ' skip existing text label=' + JSON.stringify(labels[i]));
                 skipped++;
                 continue;
             }
-            const field = await nfOpenFinding(row);
+            const field = await nfOpenFinding(row, i === 0);
             if (!field) {
-                nfLog('fill #' + i + ' no field (Add Finding missing?) label=' + JSON.stringify(labels[i]) + ' row=' + JSON.stringify(snippets[i]));
+                nfLog('fill #' + i + ' no field label=' + JSON.stringify(labels[i]) + ' row=' + JSON.stringify(snippets[i]));
                 failed++;
                 continue;
             }
-            // Re-read the label now that a field exists, in case the first pass had no field yet.
+            if (nfIsSearchBox(field)) {
+                nfLog('fill #' + i + ' refused search box ' + nfDescribe(field));
+                failed++;
+                continue;
+            }
             let label = labels[i] || getInspectionLabel(field, row);
             if (label) labels[i] = label;
             if (!label) nfLog('fill #' + i + ' label="" row=' + JSON.stringify(snippets[i]));
             let use = (texts && texts[i]) || NF_GENERIC;
-            // If the first ipc used an empty label and we just recovered one, ask again.
             if (label && use === NF_GENERIC) {
                 try {
-                    const again = ipcRenderer.sendSync('inspection-phrases', { action: 'fill', labels: [label], snippets: [snippets[i]] });
+                    const again = await nfInvoke({ action: 'fill', labels: [label], snippets: [snippets[i]] });
                     if (again && again[0]) use = again[0];
                 } catch (e) {}
             }
             await nfSetValue(field, use);
-            nfLog('fill #' + i + ' wrote label=' + JSON.stringify(label) + ' chars=' + use.length);
+            nfLog('fill #' + i + ' wrote label=' + JSON.stringify(label) + ' chars=' + use.length + ' into=' + nfDescribe(field));
             filled++;
-            await nfSleep(40);
+            // Close a leftover portal so the next row starts clean.
+            try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); } catch (e) {}
         }
-        // Second pass: virtualised rows that appeared after scrolling, or Add Finding that we missed.
-        const again = nfFindRows();
-        for (const row of again) {
-            if (rows.includes(row)) continue;
-            try { row.scrollIntoView({ block: 'nearest' }); } catch (e) {}
-            if (!ratedAll) nfRateRowGreen(row);
-            const existingField = nfFields(row)[0];
-            const existing = existingField ? nfFieldValue(existingField) : '';
-            if (existing && !nfIsGenerated(existing)) { skipped++; continue; }
-            const field = await nfOpenFinding(row);
-            if (!field) continue;
-            const label = getInspectionLabel(field, row);
-            let use = NF_GENERIC;
-            try {
-                const got = ipcRenderer.sendSync('inspection-phrases', { action: 'fill', labels: [label], snippets: [nfSnippet(row)] });
-                if (got && got[0]) use = got[0];
-            } catch (e) {}
-            if (!label) nfLog('fill extra label="" row=' + JSON.stringify(nfSnippet(row)));
-            await nfSetValue(field, use);
-            filled++;
-            nfLog('fill extra wrote label=' + JSON.stringify(label));
+        // Conservative second pass: only if the first pass left failures. Do not reopen
+        // "Add finding" on a row we already filled — that writes into a leftover/hidden portal.
+        if (failed > 0 && performance.now() < deadline) {
+            await nfYield();
+            const again = nfFindRows(card);
+            for (const row of again) {
+                if (rows.includes(row)) {
+                    const vis = nfVisibleFields(row)[0];
+                    if (!vis || nfFieldValue(vis)) continue; // no empty visible field left to fill
+                }
+                if (performance.now() > deadline) break;
+                await nfYield();
+                if (!ratedAll) { await nfRateRowGreen(row); nfSliceStart = performance.now(); }
+                const existingField = nfVisibleFields(row)[0];
+                const existing = existingField ? nfFieldValue(existingField) : '';
+                if (existing && !nfIsGenerated(existing)) { skipped++; continue; }
+                const field = await nfOpenFinding(row, false);
+                if (!field || nfIsSearchBox(field) || !nfIsVisible(field)) continue;
+                const label = getInspectionLabel(field, row);
+                let use = NF_GENERIC;
+                try {
+                    const got = await nfInvoke({ action: 'fill', labels: [label], snippets: [nfStripNoise(nfCellText(row)).slice(0, 160)] });
+                    if (got && got[0]) use = got[0];
+                } catch (e) {}
+                await nfSetValue(field, use);
+                filled++;
+                nfLog('fill extra wrote label=' + JSON.stringify(label) + ' into=' + nfDescribe(field));
+                try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); } catch (e) {}
+            }
         }
-        nfLog('fill done filled=' + filled + ' skipped=' + skipped + ' failed=' + failed + ' rows=' + rows.length);
+        nfMarkSlice();
+        nfLog('fill done filled=' + filled + ' skipped=' + skipped + ' failed=' + failed + ' rows=' + rows.length + ' ms=' + Math.round(performance.now() - t0) + ' maxSlice=' + Math.round(nfMaxSlice));
     } catch (e) {
         nfLog('fill error: ' + (e && e.message) + ' ' + (e && e.stack));
     } finally {
+        nfMarkSlice();
+        try {
+            document.documentElement.dataset.tekproNfMaxSlice = String(Math.round(nfMaxSlice));
+            document.documentElement.dataset.tekproNf = 'done';
+        } catch (e) {}
+        nfResumeWorld();
+        nfLogFlush();
         nfBusy = false;
-        try { document.documentElement.dataset.tekproNf = 'done'; } catch (e) {}
     }
 }
 
 async function clearNoFaults() {
     if (nfBusy) return;
     nfBusy = true;
+    nfPauseWorld();
+    nfSliceStart = performance.now();
     try { document.documentElement.dataset.tekproNf = 'running'; } catch (e) {}
     try {
+        await nfLoadBook();
         nfLog('clear start');
-        const fields = nfFields(document).filter(f => nfFieldValue(f));
+        const card = nfFindCard();
+        const fields = nfFields(card || document).filter(f => nfFieldValue(f) && !nfIsSearchBox(f));
         if (!fields.length) { nfLog('clear: no filled fields'); return; }
         let flags = null;
-        try { flags = ipcRenderer.sendSync('inspection-phrases', { action: 'clear', values: fields.map(f => nfFieldValue(f)) }); } catch (e) {}
+        try { flags = await nfInvoke({ action: 'clear', values: fields.map(f => nfFieldValue(f)) }); } catch (e) {}
         let n = 0;
         for (let i = 0; i < fields.length; i++) {
-            const generated = flags ? flags[i] === true : nfFieldValue(fields[i]).toUpperCase() === NF_GENERIC.toUpperCase();
+            await nfYield();
+            const generated = flags ? flags[i] === true : nfIsGenerated(nfFieldValue(fields[i]));
             if (generated) {
                 await nfSetValue(fields[i], '');
                 n++;
-                await nfSleep(30);
             }
         }
         nfLog('clear done removed=' + n + ' of ' + fields.length);
     } catch (e) {
         nfLog('clear error: ' + (e && e.message));
     } finally {
-        nfBusy = false;
         try { document.documentElement.dataset.tekproNf = 'done'; } catch (e) {}
+        nfResumeWorld();
+        nfLogFlush();
+        nfBusy = false;
     }
 }
 
@@ -1049,6 +1440,7 @@ window.addEventListener("DOMContentLoaded", () => {
 });
 
 document.addEventListener('focusout', (event) => {
+    if (nfBusy || nfSuppressAutoCaps) return;
     if (!appSettings.autoCaps) return;
     const el = event.target;
     if (!el || !el.tagName) return;

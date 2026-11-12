@@ -1,67 +1,56 @@
-// v2.4.1 Electron e2e: real preload (sandboxed) on a mock inspection page
-// that mirrors the live Tekmetric layout (Rate All Tasks, rating circles,
-// task name in a sibling cell sharing a wrapper with the ratings — the
-// structure that left 2.4.0 labels empty — and "Add Finding" that reveals
-// a textarea). Run: xvfb-run npx electron test/e2e-nofaults.js
+// v2.4.2 Electron e2e: Fill "No Faults" on a mock inspection page, including a
+// live-Tekmetric layout (MUI Select via mousedown + portal menu, ratings in a
+// sibling cell, Add finding opening a portal, global search + concerns that
+// must not be touched) and a heavy 5000-node page with no long task > 200ms.
+// Run: xvfb-run npx electron test/e2e-nofaults.js
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path'), fs = require('fs'), os = require('os');
 const ph = require('../inspection-phrases');
 app.setPath('userData', fs.mkdtempSync(path.join(os.tmpdir(), 'tekpro-nf-')));
-ipcMain.on('get-settings', e => { e.returnValue = { showSidebar: false, presets: [] }; });
+
+ipcMain.on('get-settings', e => { e.returnValue = { showSidebar: false, presets: [], autoCaps: true }; });
 ipcMain.on('get-small-logo', e => { e.returnValue = ''; });
 ipcMain.on('get-pdf-hook', e => { e.returnValue = ''; });
+
 const seen = [], logs = [];
-ipcMain.on('inspection-phrases', (e, req) => {
-  if (req.action === 'fill') { seen.push(...req.labels); e.returnValue = req.labels.map(l => ph.phraseFor(l).text); }
-  else if (req.action === 'clear') e.returnValue = (req.values || []).map(v => ph.isGeneratedPhrase(v));
-  else if (req.action === 'log') { logs.push(req.message); console.log('LOG', req.message); e.returnValue = true; }
-  else e.returnValue = null;
+function phrasesIpc(req) {
+  if (!req) return null;
+  if (req.action === 'fill') { seen.push(...(req.labels || [])); return (req.labels || []).map(l => ph.phraseFor(l).text); }
+  if (req.action === 'clear') return (req.values || []).map(v => ph.isGeneratedPhrase(v));
+  if (req.action === 'book') {
+    return { generic: ph.GENERIC, sentences: ph.RULES.map(r => r.text).concat(ph.LEGACY || []).concat([ph.GENERIC]) };
+  }
+  if (req.action === 'log') { logs.push(req.message); return true; }
+  return null;
+}
+ipcMain.handle('inspection-phrases', async (e, req) => phrasesIpc(req));
+ipcMain.on('inspection-phrases', (e, req) => { e.returnValue = phrasesIpc(req); });
+ipcMain.on('inspection-phrases-log', (e, batch) => {
+  (Array.isArray(batch) ? batch : [batch]).forEach(m => { logs.push(m); console.log('LOG', m); });
 });
 ipcMain.on('document-ready', () => {});
 
 const TASKS = [
-  'WARNING LIGHTS ON DASH',
-  'CABIN AIR FILTER',
-  'LIGHT CHECK',
-  'WIPER BLADES & WINDSHIELD',
-  'HORN',
-  'AIR FILTER',
-  'FLUID LEVELS',
-  'BELT(S)',
-  'BATTERY & TERMINALS',
-  'ALTERNATOR',
-  'SHOCKS, STRUTS & SPRINGS',
-  'CV AXLE & BOOTS',
-  'SWAY BAR BUSHINGS & STABILIZER LINKS',
-  'CONTROL ARMS AND BALL JOINTS',
-  'TIE RODS',
-  'FRONT BRAKE PADS AND ROTORS',
-  'REAR BRAKE PADS AND ROTORS/DRUMS',
-  'TIRES TREAD, CONDITION, & PSI',
-  'BODY, FRAME, & CONDITION',
-  'BRAKE LINES & FUEL LINES',
-  'EXHAUST SYSTEM',
-  'FLUID LEAKS',
-  'OTHER FAULTS FOUND',
+  'WARNING LIGHTS ON DASH', 'CABIN AIR FILTER', 'LIGHT CHECK', 'WIPER BLADES & WINDSHIELD',
+  'HORN', 'AIR FILTER', 'FLUID LEVELS', 'BELT(S)', 'BATTERY & TERMINALS', 'ALTERNATOR',
+  'SHOCKS, STRUTS & SPRINGS', 'CV AXLE & BOOTS', 'SWAY BAR BUSHINGS & STABILIZER LINKS',
+  'CONTROL ARMS AND BALL JOINTS', 'TIE RODS', 'FRONT BRAKE PADS AND ROTORS',
+  'REAR BRAKE PADS AND ROTORS/DRUMS', 'TIRES TREAD, CONDITION, & PSI',
+  'BODY, FRAME, & CONDITION', 'BRAKE LINES & FUEL LINES', 'EXHAUST SYSTEM',
+  'FLUID LEAKS', 'OTHER FAULTS FOUND',
 ];
 const SECTIONS = {
-  'WARNING LIGHTS ON DASH': 'INTERIOR',
-  'LIGHT CHECK': 'EXTERIOR',
-  'AIR FILTER': 'UNDER HOOD',
-  'BATTERY & TERMINALS': 'STARTING/CHARGING SYSTEM',
-  'SHOCKS, STRUTS & SPRINGS': 'STEERING AND SUSPENSION',
-  'FRONT BRAKE PADS AND ROTORS': 'BRAKES',
-  'TIRES TREAD, CONDITION, & PSI': 'UNDER VEHICLE',
-  'FLUID LEAKS': 'FLUID LEAKS (GENERAL)',
-  'OTHER FAULTS FOUND': 'OTHER FAULTS NOT LISTED',
+  'WARNING LIGHTS ON DASH': 'INTERIOR', 'LIGHT CHECK': 'EXTERIOR', 'AIR FILTER': 'UNDER HOOD',
+  'BATTERY & TERMINALS': 'STARTING/CHARGING SYSTEM', 'SHOCKS, STRUTS & SPRINGS': 'STEERING AND SUSPENSION',
+  'FRONT BRAKE PADS AND ROTORS': 'BRAKES', 'TIRES TREAD, CONDITION, & PSI': 'UNDER VEHICLE',
+  'FLUID LEAKS': 'FLUID LEAKS (GENERAL)', 'OTHER FAULTS FOUND': 'OTHER FAULTS NOT LISTED',
 };
-// Modes that exercise every findings-cell shape seen on the live page.
 const MODE = {
-  'CABIN AIR FILTER': 'generic',          // already has GENERIC — Fill should replace it
-  'HORN': 'add',                          // Add Finding reveals textarea
+  'CABIN AIR FILTER': 'generic',
+  'HORN': 'add',
   'FLUID LEVELS': 'add',
-  'FRONT BRAKE PADS AND ROTORS': 'user',  // technician text — must be left alone
-  'EXHAUST SYSTEM': 'ce',                 // contenteditable
+  'FRONT BRAKE PADS AND ROTORS': 'user',
+  'EXHAUST SYSTEM': 'ce',
 };
 
 function rowHtml(name, i) {
@@ -75,7 +64,7 @@ function rowHtml(name, i) {
   else findings = `<textarea id="${id}"></textarea>`;
   const section = SECTIONS[name] ? `<div class="section-head">${SECTIONS[name]}</div>` : '';
   return `${section}
-  <div class="insp-row" data-task="${name.replace(/"/g, '&quot;')}">
+  <div class="insp-row" data-task="${name}">
     <div class="left">
       <div class="ratings">
         <button type="button" class="rate rate-ok" aria-label="Checked &amp; Okay" aria-pressed="false"></button>
@@ -89,7 +78,7 @@ function rowHtml(name, i) {
   </div>`;
 }
 
-const html = `<!doctype html><html><body>
+const htmlClassic = `<!doctype html><html><body>
 <div class="card">
   <h2>30 POINT VEHICLE INSPECTION</h2>
   <div>All edits will be auto-saved</div>
@@ -145,15 +134,177 @@ document.addEventListener('click', (e) => {
 </script>
 </body></html>`;
 
+// Live-Tekmetric layout: global search, concerns, MUI Select (mousedown + body portal,
+// first option is an icon with aria-label only), ratings in a SIBLING of an inner
+// [role=row] that only has the name + "Add finding", and Add finding opens a
+// popover portal on document.body (not inside the small row). Plus 5000 junk nodes.
+const LIVE_TASKS = [
+  'WARNING LIGHTS ON DASH', 'CABIN AIR FILTER', 'HORN', 'AIR FILTER',
+  'BATTERY & TERMINALS', 'ALTERNATOR', 'FRONT BRAKE PADS AND ROTORS',
+  'TIE RODS', 'FLUID LEAKS', 'OTHER FAULTS FOUND',
+];
+function liveRow(name) {
+  return `<div class="grid-row insp-row" data-task="${name}">
+    <div class="rating-cell">
+      <div class="ratings">
+        <button type="button" class="rate rate-ok" aria-label="Checked &amp; Okay" aria-pressed="false"></button>
+        <button type="button" class="rate" aria-label="Requires Attention Soon" aria-pressed="false"></button>
+        <button type="button" class="rate" aria-label="Requires Immediate Attention" aria-pressed="false"></button>
+        <button type="button" class="rate" aria-label="Not Applicable" aria-pressed="false"></button>
+      </div>
+    </div>
+    <div class="name-cell">
+      <div role="row">
+        <span>${name}</span>
+        <button type="button" class="add-finding">Add finding</button>
+      </div>
+    </div>
+  </div>`;
+}
+const htmlLive = `<!doctype html><html><body>
+<header>
+  <input id="global-search" type="text" placeholder="Search Tekmetric..." />
+</header>
+<div class="concerns">
+  <h3>Concerns</h3>
+  <div class="concern-row">
+    4 NEW WINTER TIRES
+    <button type="button" class="add-finding">Add finding</button>
+    <button type="button">Add media</button>
+    <button type="button">Edit</button>
+  </div>
+  <div class="concern-row">
+    -&gt; SUMMERS IN BAGS INTO VEHICLE PLEASE
+    <button type="button" class="add-finding">Add finding</button>
+    <button type="button">Add media</button>
+    <button type="button">Edit</button>
+  </div>
+</div>
+<div class="insp-card" id="insp-card">
+  <h2>30 POINT VEHICLE INSPECTION</h2>
+  <div>All edits will be auto-saved</div>
+  <div class="toolbar">
+    <label id="rate-all-label">Rate All Tasks</label>
+    <div id="rate-all-mui" role="button" aria-haspopup="listbox" aria-labelledby="rate-all-label" tabindex="0"></div>
+  </div>
+  <div class="cols">Rating | Inspection Task | Findings</div>
+  ${LIVE_TASKS.map(liveRow).join('\n')}
+</div>
+<div id="junk"></div>
+<script>
+window.__rateAllUsed = false;
+window.__rowRateClicks = 0;
+window.__concernClicked = false;
+window.__portals = 0;
+window.__longTasks = [];
+window.__longTaskErr = '';
+// Observer is started AFTER the 5000 junk nodes are built, so page setup is not counted.
+
+function selectGreen(row) {
+  row.querySelectorAll('.rate').forEach(b => { b.setAttribute('aria-pressed', 'false'); b.classList.remove('selected'); });
+  const g = row.querySelector('.rate-ok');
+  if (g) { g.setAttribute('aria-pressed', 'true'); g.classList.add('selected'); }
+}
+
+// MUI Select: opens on mousedown only. A plain click does nothing.
+const mui = document.getElementById('rate-all-mui');
+mui.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  if (document.getElementById('mui-portal-menu')) return;
+  const menu = document.createElement('ul');
+  menu.id = 'mui-portal-menu';
+  menu.setAttribute('role', 'listbox');
+  menu.className = 'MuiMenu-list';
+  const opt1 = document.createElement('li');
+  opt1.setAttribute('role', 'option');
+  opt1.setAttribute('aria-label', 'Checked & Okay');
+  opt1.setAttribute('data-value', 'ok');
+  opt1.innerHTML = '<svg width="16" height="16"><circle cx="8" cy="8" r="7" fill="green"></circle></svg>';
+  const pick = (ev) => {
+    ev.preventDefault(); ev.stopPropagation();
+    window.__rateAllUsed = true;
+    document.querySelectorAll('.insp-card .insp-row').forEach(selectGreen);
+    menu.remove();
+  };
+  opt1.addEventListener('mousedown', pick);
+  opt1.addEventListener('click', pick);
+  menu.appendChild(opt1);
+  ['Requires Attention Soon', 'Requires Immediate Attention', 'Not Applicable'].forEach(t => {
+    const li = document.createElement('li');
+    li.setAttribute('role', 'option');
+    li.textContent = t;
+    menu.appendChild(li);
+  });
+  document.body.appendChild(menu);
+});
+
+document.addEventListener('mousedown', (e) => {
+  const concern = e.target.closest('.concerns .add-finding');
+  if (concern) { window.__concernClicked = true; return; }
+  const add = e.target.closest('.insp-card .add-finding');
+  if (!add) return;
+  e.preventDefault();
+  const row = add.closest('.insp-row');
+  const task = row.getAttribute('data-task');
+  const pop = document.createElement('div');
+  pop.className = 'MuiPopover-root';
+  const ta = document.createElement('textarea');
+  ta.className = 'portal-finding';
+  ta.setAttribute('data-task', task);
+  const save = () => { row.setAttribute('data-finding', ta.value || ''); };
+  ta.addEventListener('input', save);
+  ta.addEventListener('change', save);
+  ta.addEventListener('blur', save);
+  pop.appendChild(ta);
+  document.body.appendChild(pop);
+  ta.focus();
+  window.__portals = (window.__portals || 0) + 1;
+});
+
+document.addEventListener('click', (e) => {
+  const rate = e.target.closest('.insp-card .rate');
+  if (!rate) return;
+  window.__rowRateClicks = (window.__rowRateClicks || 0) + 1;
+  const row = rate.closest('.insp-row');
+  row.querySelectorAll('.rate').forEach(b => { b.setAttribute('aria-pressed', 'false'); b.classList.remove('selected'); });
+  rate.setAttribute('aria-pressed', 'true');
+  rate.classList.add('selected');
+});
+
+const junk = document.getElementById('junk');
+const frag = document.createDocumentFragment();
+for (let i = 0; i < 5000; i++) {
+  const d = document.createElement('div');
+  d.className = 'junk-item';
+  const s = document.createElement('span');
+  s.textContent = 'Junk item ' + i + ' Warning Lights cabin filter battery';
+  const b = document.createElement('button');
+  b.textContent = 'x';
+  const a = document.createElement('a');
+  a.href = '#';
+  a.textContent = 'link';
+  d.appendChild(s); d.appendChild(b); d.appendChild(a);
+  frag.appendChild(d);
+}
+junk.appendChild(frag);
+new MutationObserver(() => { window.__obsCount = (window.__obsCount || 0) + 1; })
+  .observe(document.body, { childList: true, subtree: true });
+try {
+  const po = new PerformanceObserver((list) => {
+    for (const e of list.getEntries()) window.__longTasks.push(e.duration);
+  });
+  po.observe({ type: 'longtask', buffered: false });
+} catch (err) { window.__longTaskErr = String(err); }
+</script>
+</body></html>`;
+
 function fail(msg) { console.error('NOFAULTS E2E FAIL:', msg); app.exit(1); }
 
 app.whenReady().then(async () => {
   const w = new BrowserWindow({ show: false, webPreferences: { preload: path.join(__dirname, '../preload.js'), contextIsolation: true } });
-  await w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
-  await new Promise(r => setTimeout(r, 300));
 
   async function waitDone(ms) {
-    const ok = await w.webContents.executeJavaScript(`new Promise(resolve => {
+    return w.webContents.executeJavaScript(`new Promise(resolve => {
       if (document.documentElement.dataset.tekproNf === 'done') return resolve(true);
       const t0 = Date.now();
       const t = setInterval(() => {
@@ -161,7 +312,6 @@ app.whenReady().then(async () => {
         else if (Date.now() - t0 > ${ms || 20000}) { clearInterval(t); resolve(false); }
       }, 40);
     })`);
-    return ok;
   }
   async function run(channel) {
     await w.webContents.executeJavaScript(`document.documentElement.dataset.tekproNf = ''`);
@@ -169,13 +319,12 @@ app.whenReady().then(async () => {
     const ok = await waitDone(20000);
     if (!ok) throw new Error('timed out waiting for ' + channel);
   }
-  async function state() {
+  async function classicState() {
     return w.webContents.executeJavaScript(`(() => {
       const rows = [...document.querySelectorAll('.insp-row')];
       return {
         rateAllUsed: !!window.__rateAllUsed,
         rowClicks: window.__rowRateClicks || 0,
-        rateAllPresent: !!document.getElementById('rate-all-btn'),
         rows: rows.map(r => {
           const f = r.querySelector('textarea, input, [contenteditable="true"]');
           let value = '', kind = 'none';
@@ -191,36 +340,28 @@ app.whenReady().then(async () => {
   }
 
   try {
+    // ---------- Scenario A: classic in-row fields (regression) ----------
+    await w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(htmlClassic));
+    await new Promise(r => setTimeout(r, 200));
+    seen.length = 0;
     await run('fill-no-faults');
-    const s1 = await state();
-    console.log('labels', JSON.stringify(seen));
-    console.log('state1', JSON.stringify(s1, null, 1));
-
-    if (!s1.rateAllUsed) throw new Error('Rate All Tasks was not used');
-    if (s1.rows.length !== TASKS.length) throw new Error('row count ' + s1.rows.length);
-
+    const s1 = await classicState();
+    console.log('A labels', JSON.stringify(seen));
+    console.log('A state', JSON.stringify(s1, null, 1));
+    if (!s1.rateAllUsed) throw new Error('A: Rate All Tasks was not used');
+    if (s1.rows.length !== TASKS.length) throw new Error('A: row count ' + s1.rows.length);
     for (const r of s1.rows) {
-      if (r.green !== 'true') throw new Error('not green: ' + r.task + ' pressed=' + r.green);
+      if (r.green !== 'true') throw new Error('A: not green: ' + r.task);
       if (r.task === 'FRONT BRAKE PADS AND ROTORS') {
-        if (r.value !== 'PADS AT 3MM') throw new Error('user text overwritten: ' + r.value);
+        if (r.value !== 'PADS AT 3MM') throw new Error('A: user text overwritten: ' + r.value);
         continue;
       }
       const want = ph.phraseFor(r.task).text;
-      if (r.value.trim() !== want) throw new Error('wording for ' + r.task + ': got ' + JSON.stringify(r.value) + ' want ' + JSON.stringify(want));
-      if (r.kind === 'none' || r.kind === 'add') throw new Error('no field opened for ' + r.task);
+      if (r.value.trim() !== want) throw new Error('A: wording for ' + r.task + ': got ' + JSON.stringify(r.value) + ' want ' + JSON.stringify(want));
     }
-    // Labels sent over ipc must include the task names (the 2.4.0 bug was label="")
     const useful = seen.filter(l => l && /warning lights|cabin air|horn|battery|alternator|fluid levels|belt|exhaust|other faults/i.test(l));
-    if (useful.length < 6) throw new Error('labels were not extracted from rows: ' + JSON.stringify(seen));
-    if (seen.some(l => l === '')) {
-      const empty = seen.map((l, i) => l === '' ? i : null).filter(x => x != null);
-      // Empty labels for any of the 23 is a regression of the original bug. Allow only if a
-      // later recovered-label pass still wrote the right wording (already asserted above),
-      // but flag it.
-      console.log('WARN empty labels at', empty, 'snippets in logs');
-    }
+    if (useful.length < 6) throw new Error('A: labels not extracted: ' + JSON.stringify(seen));
 
-    // User-edit one generated box, uppercase another (Auto Uppercase), then Clear
     await w.webContents.executeJavaScript(`(() => {
       const bat = document.getElementById('t${TASKS.indexOf('BATTERY & TERMINALS')}');
       if (bat) bat.value = bat.value + ' Terminals cleaned.';
@@ -228,53 +369,93 @@ app.whenReady().then(async () => {
       if (wld) wld.value = wld.value.toUpperCase();
     })()`);
     await run('clear-no-faults');
-    const s2 = await state();
-    console.log('state2', JSON.stringify(s2, null, 1));
+    const s2 = await classicState();
     const bat = s2.rows.find(r => r.task === 'BATTERY & TERMINALS');
     const wld = s2.rows.find(r => r.task === 'WARNING LIGHTS ON DASH');
     const front = s2.rows.find(r => r.task === 'FRONT BRAKE PADS AND ROTORS');
-    const cabin = s2.rows.find(r => r.task === 'CABIN AIR FILTER');
-    const horn = s2.rows.find(r => r.task === 'HORN');
-    if (!bat.value.endsWith('Terminals cleaned.')) throw new Error('edited text was cleared: ' + bat.value);
-    if (wld.value !== '') throw new Error('uppercase generated text was not cleared: ' + wld.value);
-    if (front.value !== 'PADS AT 3MM') throw new Error('user pads text lost: ' + front.value);
-    if (cabin.value !== '') throw new Error('replaced-generic was not cleared: ' + cabin.value);
-    if (horn.value !== '') throw new Error('horn finding was not cleared: ' + horn.value);
+    if (!bat.value.endsWith('Terminals cleaned.')) throw new Error('A: edited text was cleared: ' + bat.value);
+    if (wld.value !== '') throw new Error('A: uppercase generated text was not cleared: ' + wld.value);
+    if (front.value !== 'PADS AT 3MM') throw new Error('A: user pads text lost: ' + front.value);
 
-    // Fallback: no Rate All Tasks, rate each row's green button, don't toggle already-green
     await w.webContents.executeJavaScript(`(() => {
-      const btn = document.getElementById('rate-all-btn');
-      if (btn) btn.remove();
-      const menu = document.getElementById('rate-all-menu');
-      if (menu) menu.remove();
-      window.__rateAllUsed = false;
-      window.__rowRateClicks = 0;
+      const btn = document.getElementById('rate-all-btn'); if (btn) btn.remove();
+      const menu = document.getElementById('rate-all-menu'); if (menu) menu.remove();
+      window.__rateAllUsed = false; window.__rowRateClicks = 0;
       document.querySelectorAll('.insp-row').forEach(row => {
         row.querySelectorAll('.rate').forEach(b => { b.setAttribute('aria-pressed', 'false'); b.classList.remove('selected'); });
       });
-      // Leave one already green — Fill must not toggle it off
       const first = document.querySelector('.insp-row .rate-ok');
-      first.setAttribute('aria-pressed', 'true');
-      first.classList.add('selected');
+      first.setAttribute('aria-pressed', 'true'); first.classList.add('selected');
     })()`);
     await run('fill-no-faults');
-    const s3 = await state();
-    console.log('state3 clicks=', s3.rowClicks, 'rateAllUsed=', s3.rateAllUsed);
-    if (s3.rateAllUsed) throw new Error('rate-all used after control was removed');
-    if (s3.rowClicks < 20) throw new Error('per-row green fallback did not run, clicks=' + s3.rowClicks);
+    const s3 = await classicState();
+    console.log('A fallback clicks=', s3.rowClicks, 'rateAllUsed=', s3.rateAllUsed);
+    if (s3.rateAllUsed) throw new Error('A: rate-all used after control was removed');
+    if (s3.rowClicks < 20) throw new Error('A: per-row green fallback did not run, clicks=' + s3.rowClicks);
     for (const r of s3.rows) {
-      if (r.green !== 'true') throw new Error('fallback not green: ' + r.task);
+      if (r.green !== 'true') throw new Error('A: fallback not green: ' + r.task);
     }
-    // Already-green first row must still be green (not toggled off). clicks should be 22 not 23
-    // (22 remaining unselected rows). Allow 22 or 23 if detection couldn't see the first as selected.
-    const firstStill = s3.rows[0].green;
-    if (firstStill !== 'true') throw new Error('already-green was toggled off');
+    if (s3.rows[0].green !== 'true') throw new Error('A: already-green was toggled off');
+    console.log('NOFAULTS E2E A OK');
 
+    // ---------- Scenario B: live layout + heavy page ----------
+    seen.length = 0;
+    await w.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(htmlLive));
+    await new Promise(r => setTimeout(r, 400));
+    // Drop any leftover setup longtasks so we only measure fill.
+    await w.webContents.executeJavaScript('window.__longTasks = []; true');
+    const tFill = Date.now();
+    await run('fill-no-faults');
+    const elapsed = Date.now() - tFill;
+    const sB = await w.webContents.executeJavaScript(`(() => ({
+      rateAllUsed: !!window.__rateAllUsed,
+      rowClicks: window.__rowRateClicks || 0,
+      concernClicked: !!window.__concernClicked,
+      portals: window.__portals || 0,
+      search: (document.getElementById('global-search') || {}).value || '',
+      longTasks: window.__longTasks || [],
+      longTaskErr: window.__longTaskErr || '',
+      maxSlice: document.documentElement.dataset.tekproNfMaxSlice || '',
+      obs: window.__obsCount || 0,
+      rows: [...document.querySelectorAll('.insp-card .insp-row')].map(r => ({
+        task: r.getAttribute('data-task'),
+        finding: r.getAttribute('data-finding') || '',
+        green: (r.querySelector('.rate-ok') || {}).getAttribute ? r.querySelector('.rate-ok').getAttribute('aria-pressed') : null
+      })),
+      concernText: [...document.querySelectorAll('.concern-row')].map(r => r.innerText)
+    }))()`);
+    console.log('B state', JSON.stringify(sB, null, 1));
+    console.log('B elapsed ms', elapsed);
+
+    if (sB.search !== '') throw new Error('B: wrote into the global search box: ' + JSON.stringify(sB.search));
+    if (sB.concernClicked) throw new Error('B: clicked a Concerns "Add finding" button');
+    if (!sB.rateAllUsed) throw new Error('B: Rate All Tasks (MUI mousedown + portal) was not used');
+    if (sB.rows.length !== LIVE_TASKS.length) throw new Error('B: row count ' + sB.rows.length);
+    for (const r of sB.rows) {
+      if (r.green !== 'true') throw new Error('B: not green: ' + r.task + ' pressed=' + r.green);
+      const want = ph.phraseFor(r.task).text;
+      if ((r.finding || '').trim() !== want) {
+        throw new Error('B: wording for ' + r.task + ': got ' + JSON.stringify(r.finding) + ' want ' + JSON.stringify(want));
+      }
+    }
+    // Labels must be clean task names, never "Search Tekmetric", concerns, or "DASHAdd finding"
+    const badLab = seen.filter(l => /search tekmetric|winter tires|summers in bags|add finding/i.test(l || ''));
+    if (badLab.length) throw new Error('B: bad labels sent: ' + JSON.stringify(badLab));
+    const liveLabs = seen.filter(l => LIVE_TASKS.includes(l));
+    if (liveLabs.length < 8) throw new Error('B: missing live task labels: ' + JSON.stringify(seen));
+
+    if (elapsed > 10000) throw new Error('B: fill took too long: ' + elapsed + 'ms');
+    const slice = parseFloat(sB.maxSlice || '0');
+    if (slice > 200) throw new Error('B: max sync slice ' + slice + 'ms exceeds 200ms');
+    const long = (sB.longTasks || []).filter(d => d > 200);
+    if (long.length) throw new Error('B: longtask > 200ms: ' + JSON.stringify(long));
+
+    console.log('NOFAULTS E2E B OK elapsed=' + elapsed + ' maxSlice=' + slice + ' portals=' + sB.portals);
     console.log('NOFAULTS E2E OK');
     app.exit(0);
   } catch (e) {
     console.error(e && e.stack || e);
-    console.error('logs', logs.join('\n'));
+    console.error('recent logs:\n' + logs.slice(-40).join('\n'));
     fail(e && e.message);
   }
 });

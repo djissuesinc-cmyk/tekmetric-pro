@@ -1,4 +1,4 @@
-TEKMETRIC PRO - FULL SOURCE BACKUP (version 2.4.1)
+TEKMETRIC PRO - FULL SOURCE BACKUP (version 2.4.2)
 ==================================================
 
 This zip has all of the app's source code and the GitHub build setup.
@@ -11,7 +11,7 @@ RESTORE OR SET UP ON A NEW PC
 
 RELEASE AN UPDATE TO ALL SHOP PCs
 1. Make your changes.
-2. Open package.json and raise "version" (for example 2.4.1 -> 2.4.2).
+2. Open package.json and raise "version" (for example 2.4.2 -> 2.4.3).
 3. GitHub Desktop: type a Summary > Commit to main > Push origin.
 4. GitHub builds the installer by itself (takes about 3 minutes, under the Actions tab).
 5. Every installed PC finds the update on startup and installs it when the app closes.
@@ -29,15 +29,18 @@ BUILD LOCALLY (optional, needs Node.js 20)
 LOGS
   %APPDATA%\tekmetric-pro-app\pdf-stamp.log   (or Help > Troubleshooting > Open PDF Log in the app)
 
-INSPECTION "NO FAULTS" WORDING (2.4.1)
-  Quick Actions > Fill "No Faults" (Ctrl+Alt+N) rates every task green (Rate All Tasks, or
-  each row's green check if that control is missing) and writes item-specific wording in
-  each empty Findings field, e.g. "No warning lights are illuminated on the dashboard."
+INSPECTION "NO FAULTS" WORDING (2.4.2)
+  Quick Actions > Fill "No Faults" (Ctrl+Alt+N) is scoped to the inspection card only
+  (it will not write into the top Search box or into Concerns). It rates every task
+  green via Rate All Tasks (including a MUI-style dropdown) or each row's green check,
+  and writes item-specific wording in each empty Findings field, e.g.
+  "No warning lights are illuminated on the dashboard."
   The wording lives in inspection-phrases.js (one line per item). Edit the text there to change it.
   Items it doesn't recognise still get "No faults found at this time."
   Clear "No Faults" (Ctrl+Alt+C) only removes text the button wrote, never edited text.
-  Each fill writes the item name it found to the PDF log (Help > Troubleshooting > Open PDF Log),
-  lines starting "no-faults fill". If a name cannot be read, the log includes a snippet of the row.
+  Each fill writes what it found to the PDF log (Help > Troubleshooting > Open PDF Log),
+  lines starting "no-faults". If something does not fill, the log includes a short snippet
+  of the row and of whatever appeared after "Add finding" was clicked.
 
 TESTS (developer)
   node test/unit-phrases.js
