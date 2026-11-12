@@ -1422,6 +1422,75 @@ function nfCollectAddFindingButtons() {
     return out;
 }
 
+
+// --- 2.4.6: inspection-only scope for "Add finding" clicks -----------------
+function nfLowestCommonAncestor(els) {
+    if (!els || !els.length) return null;
+    let a = els[0].parentElement;
+    while (a && a !== document.body) {
+        let all = true;
+        for (let i = 1; i < els.length; i++) { if (!a.contains(els[i])) { all = false; break; } }
+        if (all) return a;
+        a = a.parentElement;
+    }
+    return null;
+}
+
+function nfAfter(ref, el) {
+    try { return !!(ref.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING); } catch (e) { return false; }
+}
+
+function nfNearConcernsButtons(el) {
+    // A Concerns row has "Add finding" next to "Add media" and "Edit".
+    let n = el.parentElement;
+    for (let i = 0; i < 4 && n && n !== document.body; i++) {
+        let bs = [];
+        try { bs = n.querySelectorAll('a, button, [role="button"], [role="link"]'); } catch (e) {}
+        if (bs.length > 8) break;
+        for (const b of bs) {
+            const t = nfOwnTextCheap(b, 40);
+            if (/add\s*media/i.test(t) || /^\s*edit\s*$/i.test(t)) return true;
+        }
+        n = n.parentElement;
+    }
+    return false;
+}
+
+function nfInInspectionScope(el, scope, rateCtls) {
+    if (!el) return false;
+    if (!scope || !scope.contains(el)) return false;
+    if (rateCtls && rateCtls.length && !rateCtls.some(c => nfAfter(c, el))) return false;
+    if (nfNearConcernsButtons(el)) return false;
+    return true;
+}
+
+function nfOpenDialogs() {
+    try { return [...document.querySelectorAll('.MuiDialog-root, [role="dialog"]')].filter(d => d.offsetParent !== null || d.getClientRects().length); }
+    catch (e) { return []; }
+}
+
+async function nfCloseStrayDialogs(before) {
+    // If a click opened a dialog (e.g. Customer Concern), cancel it without saving.
+    let closed = 0;
+    for (const d of nfOpenDialogs()) {
+        if (before && before.has(d)) continue;
+        const txt = String(d.innerText || '').slice(0, 200).replace(/\s+/g, ' ');
+        nfLog('stray dialog opened, closing: ' + JSON.stringify(txt.slice(0, 80)));
+        let btn = null;
+        try {
+            btn = [...d.querySelectorAll('button')].find(b => /^\s*cancel\s*$/i.test(b.innerText || ''))
+               || d.querySelector('button[aria-label="close" i], button[aria-label="Close"]');
+        } catch (e) {}
+        try {
+            if (btn) btn.click();
+            else d.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape', code: 'Escape' }));
+        } catch (e) {}
+        closed++;
+    }
+    if (closed) await nfSleep(150);
+    return closed;
+}
+
 async function nfOpenEnterFinding(add) {
     if (!add || !nfAllow(add, 'add-finding')) return null;
     const before = new Set();
@@ -1500,13 +1569,24 @@ async function fillNoFaults() {
         nfLog('fill fields=' + fields.length + (fields[0] ? (' first=' + nfDescribe(fields[0]) + ' row=' + JSON.stringify(nfHtmlSnippet(fieldRow.get(fields[0]) || fields[0].parentElement, 300))) : ''));
 
         // Secondary: "Add findings" on rows that still have no Enter-finding box.
-        const adds = nfCollectAddFindingButtons();
-        nfLog('fill add-finding buttons=' + adds.length);
+        // Only buttons inside the inspection sheet: inside the block that holds
+        // all the Enter-finding boxes, after Rate All Tasks, and not next to
+        // "Add media"/"Edit" (a Customer Concerns row).
+        const allAdds = nfCollectAddFindingButtons();
+        const scopeSeed = fields.concat(allAdds.filter(a => !nfNearConcernsButtons(a) && (!rateControls.length || rateControls.some(c => nfAfter(c, a)))));
+        const inspScope = scopeSeed.length >= 2 ? nfLowestCommonAncestor(scopeSeed) : null;
+        const adds = allAdds.filter(a => nfInInspectionScope(a, inspScope, rateControls));
+        nfLog('fill add-finding buttons=' + adds.length + ' (outside inspection skipped=' + (allAdds.length - adds.length) + ') scope=' + (inspScope ? nfDescribe(inspScope) : 'none'));
         for (const add of adds) {
             if (performance.now() > deadline) break;
             if (nfFindingInConcerns(add)) continue;
             const row = add.parentElement;
+            const dlgBefore = new Set(nfOpenDialogs());
             const opened = await nfOpenEnterFinding(add);
+            if (await nfCloseStrayDialogs(dlgBefore)) {
+                nfLog('fill: add-finding opened a dialog, stopping add-finding clicks');
+                break;
+            }
             if (opened && !fields.includes(opened) && !nfFindingInConcerns(opened)) {
                 fields.push(opened);
                 if (row) fieldRow.set(opened, row);
@@ -2099,13 +2179,17 @@ document.addEventListener('focusout', (event) => {
             return;
         }
 
-        setTimeout(() => {
+        // Run now, not 150ms later. Tekmetric saves the finding on blur and can
+        // close the box; a late write landed after the save and could wipe or
+        // drop the text. This capture listener runs before the page's blur
+        // handler, so the page saves the uppercase value.
+        try {
             if (!el.value) return;
             const upper = el.value.toUpperCase();
             if (el.value !== upper) {
                 forceNativeInput(el, upper, true);
             }
-        }, 150);
+        } catch (e) {}
     }
 }, { capture: true });
 
