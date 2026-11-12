@@ -75,85 +75,528 @@ ipcRenderer.on('settings-changed', (event, newSettings) => {
     toggleSidebarVisibility();
 });
 
-// v2.4.0: "No Faults" writes wording for each inspection item. We don't know Tekmetric's exact DOM,
-// so the item name is searched for defensively near each textarea.
+// v2.4.1: "No Faults" fills each inspection row: rate green, open "Add Finding" if needed,
+// write item-specific wording. Labels come from the task-name cell in the same row
+// (Tekmetric does not put the name on the textarea via <label>/aria/placeholder).
 const NF_GENERIC = 'No faults found at this time.';
-const NF_SKIP = /^(notes?|findings?|comments?|recommendations?|technician notes?|tech notes?|add (a )?(note|finding|comment)s?|details?|description|good|fair|poor|ok|pass(ed)?|fail(ed)?|green|yellow|red|needs attention|attention|urgent|not inspected|n\/a|na|none|inspection|inspections|status|condition|select|save|cancel|edit|delete|remove|photo|photos|video|media|upload|type here.*|enter .*|write .*)$/i;
-const NF_HEAD_SEL = 'h1,h2,h3,h4,h5,h6,legend,label,strong,b,[role="heading"],[class*="title" i],[class*="name" i],[class*="label" i],[class*="header" i],[class*="heading" i]';
+const NF_CLICK = 'button, a, [role="button"], [role="radio"], [role="menuitem"], [role="option"], [role="tab"], input[type="button"], input[type="radio"], input[type="checkbox"]';
+const NF_FIELD = 'textarea, input[type="text"], input[type="search"], input:not([type]), [contenteditable="true"], [contenteditable=""]';
+const NF_RATE_ARIA = /checked|okay|\bok\b|attention|immediate|not applicable|n\/a|pass|fail|good|fair|poor|satisfactory|green|yellow|red|warning|needs?\s*(work|attention)|approved/i;
+const NF_SKIP_TEXT = /^(notes?|findings?|comments?|recommendations?|technician notes?|tech notes?|add (a )?(note|finding|comment)s?|details?|description|good|fair|poor|ok|pass(ed)?|fail(ed)?|green|yellow|red|needs attention|attention|urgent|not inspected|n\/a|na|none|inspection|inspections|status|condition|select|save|cancel|edit|delete|remove|photo|photos|video|media|upload|rating|inspection task|rate all tasks|checked\s*(&|and)\s*okay|requires attention soon|requires immediate attention|not applicable|type here.*|enter .*|write .*)$/i;
+const NF_SECTION = /^(interior|exterior|under hood|starting\/?charging(\s+system)?|steering and suspension|brakes|under vehicle|fluid leaks\s*\(\s*general\s*\)|other faults not listed|30 point vehicle inspection|rate all tasks)$/i;
 
-function nfClean(t) {
-    const s = String(t || '').replace(/\s+/g, ' ').trim().replace(/[:*\u2022\-\s]+$/, '');
-    if (s.length < 2 || s.length > 80 || !/[a-z]/i.test(s) || NF_SKIP.test(s)) return '';
+let nfBusy = false;
+
+function nfSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function nfLog(msg) {
+    const line = String(msg || '');
+    const out = line.startsWith('no-faults') ? line : ('no-faults ' + line);
+    try { console.log('[tekpro-nf] ' + out); } catch (e) {}
+    try { ipcRenderer.sendSync('inspection-phrases', { action: 'log', message: out }); } catch (e) {}
+}
+
+function nfSnippet(el, n) {
+    const t = ((el && (el.innerText || el.textContent)) || '').replace(/\s+/g, ' ').trim();
+    return t.slice(0, n || 160);
+}
+
+function nfWait(fn, timeout, interval) {
+    timeout = timeout == null ? 2000 : timeout;
+    interval = interval == null ? 50 : interval;
+    return new Promise(resolve => {
+        const start = Date.now();
+        let obs = null;
+        let finished = false;
+        const done = (v) => {
+            if (finished) return;
+            finished = true;
+            try { if (obs) obs.disconnect(); } catch (e) {}
+            resolve(v);
+        };
+        const tick = () => {
+            if (finished) return;
+            try {
+                const v = fn();
+                if (v) return done(v);
+            } catch (e) {}
+            if (Date.now() - start >= timeout) return done(null);
+            setTimeout(tick, interval);
+        };
+        try {
+            obs = new MutationObserver(() => tick());
+            if (document.body) obs.observe(document.body, { childList: true, subtree: true, attributes: true });
+        } catch (e) {}
+        tick();
+    });
+}
+
+function nfClick(el) {
+    if (!el) return;
+    try { el.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) {}
+    try { if (typeof el.focus === 'function') el.focus(); } catch (e) {}
+    try { el.click(); } catch (e) {
+        try {
+            const opts = { bubbles: true, cancelable: true, view: window };
+            el.dispatchEvent(new MouseEvent('pointerdown', opts));
+            el.dispatchEvent(new MouseEvent('mousedown', opts));
+            el.dispatchEvent(new MouseEvent('pointerup', opts));
+            el.dispatchEvent(new MouseEvent('mouseup', opts));
+            el.dispatchEvent(new MouseEvent('click', opts));
+        } catch (e2) {}
+    }
+}
+
+function nfIsContentEditable(el) {
+    if (!el) return false;
+    if (el.isContentEditable) return true;
+    const c = el.getAttribute && el.getAttribute('contenteditable');
+    return c === 'true' || c === '';
+}
+
+function nfFieldValue(el) {
+    if (!el) return '';
+    if (nfIsContentEditable(el)) return String(el.innerText || el.textContent || '').trim();
+    return String(el.value == null ? '' : el.value).trim();
+}
+
+function nfIsField(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.disabled || el.readOnly) return false;
+    const type = (el.type || '').toLowerCase();
+    if (['button', 'submit', 'checkbox', 'radio', 'hidden', 'file', 'password', 'color', 'range', 'number', 'date', 'email'].includes(type)) return false;
+    if (el.matches && el.matches(NF_FIELD)) return true;
+    return nfIsContentEditable(el);
+}
+
+function nfFields(root) {
+    const scope = root || document;
+    if (!scope.querySelectorAll) return [];
+    return Array.from(scope.querySelectorAll(NF_FIELD)).filter(nfIsField);
+}
+
+function nfClickables(root) {
+    if (!root || !root.querySelectorAll) return [];
+    return Array.from(root.querySelectorAll(NF_CLICK));
+}
+
+function nfLooksLikeRating(el) {
+    const t = ((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('data-testid') || '') + ' ' + (el.textContent || '')).replace(/\s+/g, ' ').trim();
+    return NF_RATE_ARIA.test(t);
+}
+
+function nfRatingClusters(root) {
+    if (!root) return [];
+    const clicks = nfClickables(root);
+    const groups = new Map();
+    for (const c of clicks) {
+        const p = c.parentElement;
+        if (!p) continue;
+        if (!groups.has(p)) groups.set(p, []);
+        groups.get(p).push(c);
+    }
+    const out = [];
+    for (const [p, btns] of groups) {
+        if (btns.length < 3 || btns.length > 6) continue;
+        const ratingish = btns.filter(b => nfLooksLikeRating(b) || ((b.textContent || '').trim().length <= 2));
+        if (ratingish.length >= 3 || btns.length === 4) out.push({ parent: p, buttons: btns });
+    }
+    return out;
+}
+
+function nfIsSelected(btn) {
+    if (!btn) return false;
+    const attrs = [
+        btn.getAttribute('aria-pressed'),
+        btn.getAttribute('aria-checked'),
+        btn.getAttribute('aria-selected'),
+        btn.getAttribute('data-checked'),
+        btn.getAttribute('data-selected'),
+        btn.getAttribute('data-state')
+    ];
+    if (attrs.some(a => a && /^(true|checked|selected|on)$/i.test(a))) return true;
+    if (attrs.some(a => a && /^(false|off|unchecked)$/i.test(a))) return false;
+    const cls = (typeof btn.className === 'string' ? btn.className : (btn.className && btn.className.baseVal) || '').toLowerCase();
+    if (/\b(selected|active|checked|mui-selected|mui-checked|is-selected|is-checked|is-active)\b/.test(cls)) return true;
+    return false;
+}
+
+function nfInnermost(els) {
+    return els.filter(el => !els.some(o => o !== el && el.contains(o)));
+}
+
+function nfFindAddFinding(root) {
+    if (!root || !root.querySelectorAll) return null;
+    const els = Array.from(root.querySelectorAll('a, button, span, div, p, [role="button"], [role="link"]'));
+    const exact = nfInnermost(els.filter(el => /^add finding$/i.test((el.textContent || '').replace(/\s+/g, ' ').trim())));
+    if (exact.length) return exact[0];
+    const loose = nfInnermost(els.filter(el => {
+        const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        return /add finding/i.test(t) && t.length < 40;
+    }));
+    return loose[0] || null;
+}
+
+function nfClosestRow(start) {
+    if (!start) return null;
+    try {
+        if (start.closest) {
+            const tr = start.closest('tr, [role="row"]');
+            if (tr && tr !== document.body && (nfRatingClusters(tr).length === 1 || (tr.children && tr.children.length >= 3))) return tr;
+        }
+    } catch (e) {}
+    let el = start;
+    for (let i = 0; i < 18 && el && el !== document.documentElement; i++) {
+        const p = el.parentElement;
+        if (!p || p === document.body || p === document.documentElement || p === document.head) break;
+        const clusters = nfRatingClusters(p);
+        if (clusters.length === 1 && p.children && p.children.length >= 2) return p;
+        el = p;
+    }
+    try { return start.closest('tr, [role="row"]') || null; } catch (e) { return null; }
+}
+
+function nfStripNoise(s) {
+    return String(s || '')
+        .replace(/\badd finding\b/ig, ' ')
+        .replace(/\b(rating|inspection task|findings)\b/ig, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function nfCellText(el, field) {
+    if (!el) return '';
+    let t = '';
+    const skip = 'button, textarea, input, select, svg, script, style, img, [role="button"], [role="radio"], [role="menuitem"], [contenteditable], [contenteditable="true"]';
+    const walk = (n) => {
+        if (!n) return;
+        if (n === field) return;
+        if (n.nodeType === 3) { t += n.textContent; return; }
+        if (n.nodeType !== 1) return;
+        try { if (n.matches && n.matches(skip)) return; } catch (e) {}
+        for (const c of n.childNodes) walk(c);
+    };
+    walk(el);
+    return nfStripNoise(t);
+}
+
+function nfCleanLabel(t) {
+    const s = nfStripNoise(t).replace(/[:*\u2022\-–—\s]+$/, '').replace(/^[\d.)\s\-–—\u2022]+(?=[a-z])/i, '').trim();
+    if (s.length < 2 || s.length > 120 || !/[a-z]/i.test(s) || NF_SKIP_TEXT.test(s) || NF_SECTION.test(s)) return '';
     return s;
 }
-// Text of an element without anything that contains form fields or buttons
-function nfOwnText(el) {
-    if (!el || el.nodeType !== 1) return '';
-    if (el.matches('textarea,input,select,button,script,style,svg,[role="button"],[role="radiogroup"]') || el.querySelector('textarea,input,select,button,[role="button"],[role="radio"]')) return '';
-    return el.textContent || '';
-}
-function nfBefore(a, b) { return !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING); }
 
-function getInspectionLabel(ta) {
+// Walk up from the field to the row (ancestor that also has the rating buttons / several cells),
+// then read the task-name cell — the cell between ratings and findings, excluding field and button text.
+function getInspectionLabel(ta, rowHint) {
     try {
         const direct = [];
-        const lb = ta.getAttribute('aria-labelledby');
+        const lb = ta && ta.getAttribute && ta.getAttribute('aria-labelledby');
         if (lb) direct.push(lb.split(/\s+/).map(id => { const e = document.getElementById(id); return e ? e.textContent : ''; }).join(' '));
-        direct.push(ta.getAttribute('aria-label'));
-        if (ta.id) { try { const l = document.querySelector('label[for="' + CSS.escape(ta.id) + '"]'); if (l) direct.push(l.textContent); } catch (e) {} }
-        const wrap = ta.closest('label'); if (wrap) direct.push(nfOwnText(wrap) || wrap.textContent.replace(ta.value || '', ''));
-        direct.push(ta.getAttribute('placeholder'), ta.getAttribute('title'), ta.getAttribute('name'));
-        for (const d of direct) { const c = nfClean(d); if (c) return c; }
-
-        let node = ta;
-        for (let depth = 0; depth < 6 && node && node !== document.body; depth++) {
-            const parent = node.parentElement;
-            if (!parent) break;
-            const sibs = [];
-            for (let sib = node.previousElementSibling; sib && sibs.length < 6; sib = sib.previousElementSibling) sibs.push(sib);
-            // 1) title/name/label/header-like elements in the nearest preceding siblings
-            for (const sib of sibs) {
-                const h = (sib.matches(NF_HEAD_SEL) ? [sib] : []).concat(Array.from(sib.querySelectorAll(NF_HEAD_SEL)).reverse());
-                for (const e of h) { const c = nfClean(nfOwnText(e)); if (c) return c; }
-            }
-            // 2) header-like elements anywhere in this ancestor that come before the textarea
-            const heads = Array.from(parent.querySelectorAll(NF_HEAD_SEL)).filter(e => !e.contains(ta) && nfBefore(e, ta)).reverse();
-            for (const e of heads) { const c = nfClean(nfOwnText(e)); if (c) return c; }
-            // 3) plain short text in the nearest preceding siblings
-            for (const sib of sibs) { const c = nfClean(nfOwnText(sib)); if (c) return c; }
-            node = parent;
+        if (ta && ta.getAttribute) {
+            direct.push(ta.getAttribute('aria-label'));
+            if (ta.id) { try { const l = document.querySelector('label[for="' + CSS.escape(ta.id) + '"]'); if (l) direct.push(l.textContent); } catch (e) {} }
+            const wrap = ta.closest && ta.closest('label');
+            if (wrap) direct.push((wrap.textContent || '').replace(nfFieldValue(ta), ''));
+            direct.push(ta.getAttribute('placeholder'), ta.getAttribute('title'), ta.getAttribute('name'));
         }
-    } catch (e) { console.log('[tekpro-nf] label error', e && e.message); }
+        for (const d of direct) { const c = nfCleanLabel(d); if (c && !/^add finding$/i.test(c)) return c; }
+
+        const row = rowHint || nfClosestRow(ta);
+        if (row) {
+            const kids = Array.from(row.children);
+            const clusters = nfRatingClusters(row);
+            const rateEl = clusters[0] && clusters[0].parent;
+            const findingIdx = kids.findIndex(k => (ta && k.contains(ta)) || nfFindAddFinding(k) || (k.querySelector && k.querySelector(NF_FIELD)));
+            const rateIdx = rateEl ? kids.findIndex(k => k === rateEl || k.contains(rateEl)) : -1;
+            const candidates = [];
+            kids.forEach((k, i) => {
+                if (i === findingIdx) return;
+                const text = nfCleanLabel(nfCellText(k, ta));
+                if (text) candidates.push(text);
+            });
+            // If ratings and the name share a child (rateIdx), that child's text (buttons already stripped) is the name.
+            if (rateIdx >= 0 && rateIdx !== findingIdx) {
+                const shared = nfCleanLabel(nfCellText(kids[rateIdx], ta));
+                if (shared) candidates.unshift(shared);
+            }
+            for (const c of candidates) { if (c && !NF_SECTION.test(c)) return c; }
+            const all = nfCleanLabel(nfCellText(row, ta));
+            if (all && !NF_SECTION.test(all)) return all;
+        }
+    } catch (e) { nfLog('label error: ' + (e && e.message)); }
     return '';
 }
 
-function fillNoFaults() {
-    const tas = Array.from(document.querySelectorAll('textarea')).filter(ta => !ta.value || ta.value.trim() === '');
-    if (!tas.length) return;
-    const labels = tas.map(getInspectionLabel);
-    let texts = null;
-    try { texts = ipcRenderer.sendSync('inspection-phrases', { action: 'fill', labels }); } catch (e) {}
-    tas.forEach((ta, i) => {
-        const t = (texts && texts[i]) || NF_GENERIC;
-        console.log('[tekpro-nf] label=' + JSON.stringify(labels[i]) + ' -> ' + t.split('\n')[0]);
-        forceNativeInput(ta, t);
+function nfFindRows() {
+    const starts = [];
+    nfFields(document).forEach(el => starts.push(el));
+    const adds = [];
+    try {
+        Array.from(document.querySelectorAll('a, button, span, div, [role="button"], [role="link"]')).forEach(el => {
+            const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+            if (/^add finding$/i.test(t)) adds.push(el);
+        });
+    } catch (e) {}
+    nfInnermost(adds).forEach(el => {
+        // Skip if this Add Finding is already inside a row we'll pick up from a field
+        starts.push(el);
     });
+    const rows = [];
+    const seen = new Set();
+    for (const s of starts) {
+        const row = nfClosestRow(s);
+        if (!row) continue;
+        if (seen.has(row)) continue;
+        seen.add(row);
+        rows.push(row);
+    }
+    rows.sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1);
+    return rows;
 }
 
-function clearNoFaults() {
-    const tas = Array.from(document.querySelectorAll('textarea')).filter(ta => ta.value && ta.value.trim() !== '');
-    if (!tas.length) return;
+async function nfSetValue(el, val) {
+    try {
+        if (nfIsContentEditable(el)) {
+            el.focus();
+            el.textContent = val;
+            try { el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: val, inputType: 'insertText' })); }
+            catch (e) { el.dispatchEvent(new Event('input', { bubbles: true, composed: true })); }
+            el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+            await nfSleep(80);
+            try { el.blur(); } catch (e) {}
+            await nfSleep(80);
+            return;
+        }
+        const lastValue = el.value;
+        const proto = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype;
+        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+        const setter = desc && desc.set;
+        el.focus();
+        if (setter) setter.call(el, val); else el.value = val;
+        if (el._valueTracker) el._valueTracker.setValue(lastValue);
+        el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        await nfSleep(80);
+        try { el.blur(); } catch (e) {}
+        await nfSleep(80);
+    } catch (e) {
+        nfLog('set-value error: ' + (e && e.message));
+    }
+}
+
+function nfInnermostText(root, re, maxLen) {
+    if (!root || !root.querySelectorAll) return null;
+    const els = Array.from(root.querySelectorAll('a, button, span, div, p, li, label, select, option, [role="button"], [role="menuitem"], [role="option"], [role="link"]'));
+    const hits = els.filter(el => {
+        const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!re.test(t)) return false;
+        if (maxLen && t.length > maxLen) return false;
+        return true;
+    });
+    hits.sort((a, b) => ((a.textContent || '').length) - ((b.textContent || '').length));
+    return hits[0] || null;
+}
+
+async function nfRateAllGreen() {
+    const control = nfInnermostText(document.body, /rate all tasks/i, 60);
+    if (!control) {
+        nfLog('rate-all: control not found, will rate each row');
+        return false;
+    }
+    const sel = (control.tagName === 'SELECT' ? control : (control.closest && control.closest('select')));
+    if (sel && sel.options) {
+        const option = Array.from(sel.options).find(o => /checked\s*(&|and)?\s*okay|\bokay\b|checked/i.test(o.text));
+        if (option) {
+            const last = sel.value;
+            sel.value = option.value;
+            if (sel._valueTracker) sel._valueTracker.setValue(last);
+            sel.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            sel.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+            nfLog('rate-all: set <select> to ' + JSON.stringify(option.text));
+            await nfSleep(200);
+            return true;
+        }
+    }
+    const clickable = (control.closest && control.closest(NF_CLICK)) || control;
+    nfLog('rate-all: clicking control');
+    nfClick(clickable);
+    const opt = await nfWait(() => {
+        const els = Array.from(document.querySelectorAll('li, button, [role="menuitem"], [role="option"], [role="listitem"], label, span, div, a'));
+        const cands = els.filter(el => {
+            const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+            if (t.length > 60 || t.length < 2) return false;
+            if (el === control || (control.contains && control.contains(el) && el !== clickable && t.toLowerCase() === (control.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase())) return false;
+            return /checked\s*(&|and)\s*okay/i.test(t) || /^checked\s*(&|and)?\s*ok(ay)?$/i.test(t);
+        });
+        cands.sort((a, b) => ((a.textContent || '').length) - ((b.textContent || '').length));
+        return cands[0] || null;
+    }, 2000);
+    if (opt) {
+        nfClick((opt.closest && opt.closest(NF_CLICK)) || opt);
+        nfLog('rate-all: chose green/okay ' + JSON.stringify((opt.textContent || '').replace(/\s+/g, ' ').trim()));
+        await nfSleep(250);
+        return true;
+    }
+    nfLog('rate-all: menu opened but green option not found, snippet=' + JSON.stringify(nfSnippet(document.body)));
+    try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); } catch (e) {}
+    return false;
+}
+
+function nfRateRowGreen(row) {
+    const clusters = nfRatingClusters(row);
+    if (!clusters.length) return 'no-ratings';
+    const green = clusters[0].buttons[0];
+    if (nfIsSelected(green)) return 'already-green';
+    nfClick(green);
+    return 'clicked';
+}
+
+async function nfOpenFinding(row) {
+    let fields = nfFields(row);
+    if (fields.length) return fields[0];
+    const add = nfFindAddFinding(row);
+    if (!add) return null;
+    nfClick(add);
+    const field = await nfWait(() => {
+        const f = nfFields(row);
+        return f[0] || null;
+    }, 2500);
+    return field;
+}
+
+function nfIsGenerated(value) {
     let flags = null;
-    try { flags = ipcRenderer.sendSync('inspection-phrases', { action: 'clear', values: tas.map(ta => ta.value) }); } catch (e) {}
-    tas.forEach((ta, i) => {
-        const generated = flags ? flags[i] === true : (ta.value || '').trim().toUpperCase() === NF_GENERIC.toUpperCase();
-        if (generated) forceNativeInput(ta, '');
-    });
+    try { flags = ipcRenderer.sendSync('inspection-phrases', { action: 'clear', values: [value] }); } catch (e) {}
+    if (flags && flags[0] === true) return true;
+    return String(value || '').trim().toUpperCase() === NF_GENERIC.toUpperCase();
 }
 
-ipcRenderer.on('fill-no-faults', () => fillNoFaults());
+async function fillNoFaults() {
+    if (nfBusy) return;
+    nfBusy = true;
+    try { document.documentElement.dataset.tekproNf = 'running'; } catch (e) {}
+    try {
+        nfLog('fill start url=' + String(location.href || '').slice(0, 180));
+        const ratedAll = await nfRateAllGreen();
+        const rows = nfFindRows();
+        nfLog('fill rows=' + rows.length + ' rateAll=' + ratedAll);
+        if (!rows.length) {
+            const nFields = nfFields(document).length;
+            nfLog('fill: no inspection rows found, fields=' + nFields + ' snippet=' + JSON.stringify(nfSnippet(document.body, 200)));
+            return;
+        }
+        const labels = [];
+        const snippets = [];
+        for (const row of rows) {
+            const field = nfFields(row)[0] || null;
+            const label = getInspectionLabel(field, row);
+            labels.push(label);
+            snippets.push(nfSnippet(row, 160));
+        }
+        let texts = null;
+        try { texts = ipcRenderer.sendSync('inspection-phrases', { action: 'fill', labels, snippets }); } catch (e) {}
+        let filled = 0, skipped = 0, failed = 0;
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            try { row.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) {}
+            if (!ratedAll) {
+                const r = nfRateRowGreen(row);
+                if (r !== 'already-green') nfLog('fill #' + i + ' rate-row=' + r);
+            }
 
-ipcRenderer.on('clear-no-faults', () => clearNoFaults());
+            const existingField = nfFields(row)[0];
+            const existing = existingField ? nfFieldValue(existingField) : '';
+            if (existing && !nfIsGenerated(existing)) {
+                nfLog('fill #' + i + ' skip existing text label=' + JSON.stringify(labels[i]));
+                skipped++;
+                continue;
+            }
+            const field = await nfOpenFinding(row);
+            if (!field) {
+                nfLog('fill #' + i + ' no field (Add Finding missing?) label=' + JSON.stringify(labels[i]) + ' row=' + JSON.stringify(snippets[i]));
+                failed++;
+                continue;
+            }
+            // Re-read the label now that a field exists, in case the first pass had no field yet.
+            let label = labels[i] || getInspectionLabel(field, row);
+            if (label) labels[i] = label;
+            if (!label) nfLog('fill #' + i + ' label="" row=' + JSON.stringify(snippets[i]));
+            let use = (texts && texts[i]) || NF_GENERIC;
+            // If the first ipc used an empty label and we just recovered one, ask again.
+            if (label && use === NF_GENERIC) {
+                try {
+                    const again = ipcRenderer.sendSync('inspection-phrases', { action: 'fill', labels: [label], snippets: [snippets[i]] });
+                    if (again && again[0]) use = again[0];
+                } catch (e) {}
+            }
+            await nfSetValue(field, use);
+            nfLog('fill #' + i + ' wrote label=' + JSON.stringify(label) + ' chars=' + use.length);
+            filled++;
+            await nfSleep(40);
+        }
+        // Second pass: virtualised rows that appeared after scrolling, or Add Finding that we missed.
+        const again = nfFindRows();
+        for (const row of again) {
+            if (rows.includes(row)) continue;
+            try { row.scrollIntoView({ block: 'nearest' }); } catch (e) {}
+            if (!ratedAll) nfRateRowGreen(row);
+            const existingField = nfFields(row)[0];
+            const existing = existingField ? nfFieldValue(existingField) : '';
+            if (existing && !nfIsGenerated(existing)) { skipped++; continue; }
+            const field = await nfOpenFinding(row);
+            if (!field) continue;
+            const label = getInspectionLabel(field, row);
+            let use = NF_GENERIC;
+            try {
+                const got = ipcRenderer.sendSync('inspection-phrases', { action: 'fill', labels: [label], snippets: [nfSnippet(row)] });
+                if (got && got[0]) use = got[0];
+            } catch (e) {}
+            if (!label) nfLog('fill extra label="" row=' + JSON.stringify(nfSnippet(row)));
+            await nfSetValue(field, use);
+            filled++;
+            nfLog('fill extra wrote label=' + JSON.stringify(label));
+        }
+        nfLog('fill done filled=' + filled + ' skipped=' + skipped + ' failed=' + failed + ' rows=' + rows.length);
+    } catch (e) {
+        nfLog('fill error: ' + (e && e.message) + ' ' + (e && e.stack));
+    } finally {
+        nfBusy = false;
+        try { document.documentElement.dataset.tekproNf = 'done'; } catch (e) {}
+    }
+}
+
+async function clearNoFaults() {
+    if (nfBusy) return;
+    nfBusy = true;
+    try { document.documentElement.dataset.tekproNf = 'running'; } catch (e) {}
+    try {
+        nfLog('clear start');
+        const fields = nfFields(document).filter(f => nfFieldValue(f));
+        if (!fields.length) { nfLog('clear: no filled fields'); return; }
+        let flags = null;
+        try { flags = ipcRenderer.sendSync('inspection-phrases', { action: 'clear', values: fields.map(f => nfFieldValue(f)) }); } catch (e) {}
+        let n = 0;
+        for (let i = 0; i < fields.length; i++) {
+            const generated = flags ? flags[i] === true : nfFieldValue(fields[i]).toUpperCase() === NF_GENERIC.toUpperCase();
+            if (generated) {
+                await nfSetValue(fields[i], '');
+                n++;
+                await nfSleep(30);
+            }
+        }
+        nfLog('clear done removed=' + n + ' of ' + fields.length);
+    } catch (e) {
+        nfLog('clear error: ' + (e && e.message));
+    } finally {
+        nfBusy = false;
+        try { document.documentElement.dataset.tekproNf = 'done'; } catch (e) {}
+    }
+}
+
+ipcRenderer.on('fill-no-faults', () => { fillNoFaults(); });
+
+ipcRenderer.on('clear-no-faults', () => { clearNoFaults(); });
 
 ipcRenderer.on('insert-text', (event, textToInsert) => {
     injectText(textToInsert);
