@@ -425,10 +425,11 @@ function waitPdfViewerReady(wc, fallbackMs, capMs) {
 const PAGE_SETTLE_JS = (minMs, quietMs, maxMs) => "new Promise((resolve) => {" +
     "const t0 = Date.now(); let last = Date.now(); let n = 0;" +
     "try { new MutationObserver(() => { last = Date.now(); n++; }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true }); } catch (e) {}" +
-    "const imgsDone = () => Array.from(document.images).every(i => i.complete);" +
+    "try { document.querySelectorAll('img[loading=\"lazy\"]').forEach(i => { i.loading = 'eager'; }); } catch (e) {}" +
+    "const imgsDone = () => (Date.now() - t0) >= 1500 || Array.from(document.images).every(i => i.complete);" +
     "const tick = () => {" +
     "  const now = Date.now();" +
-    "  const ready = document.readyState === 'complete' && imgsDone() && (now - last) >= " + quietMs + " && (document.body && document.body.innerText.trim().length > 20);" +
+    "  const ready = document.readyState === 'complete' && imgsDone() && (now - last) >= " + quietMs + " && (document.body && document.body.textContent.trim().length > 20);" +
     "  if ((now - t0 >= " + minMs + " && ready) || now - t0 >= " + maxMs + ") {" +
     "    const f = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();" +
     "    f.then(() => requestAnimationFrame(() => resolve({ ms: Date.now() - t0, mutations: n, timedOut: now - t0 >= " + maxMs + " }))).catch(() => resolve({ ms: Date.now() - t0, mutations: n }));" +
@@ -805,7 +806,7 @@ function printLayoutInPage(opts) {
                 }
             } catch (e) {}
             const waiting = opts.logoRight && !document.documentElement.hasAttribute('data-leaside-logo-right');
-            if (waiting && Date.now() - started < 4000) setTimeout(tick, 250);
+            if (waiting && Date.now() - started < 1500) setTimeout(tick, 100);
             else resolve(); // v2.3.9: no extra 200ms delay after layout is ready
         };
         tick();
@@ -838,7 +839,8 @@ function checkAndPrintInspection(urlLoc) {
         show: false, 
         webPreferences: { 
             partition: 'persist:tekmetric_session', 
-            preload: path.join(__dirname, 'preload.js') 
+            preload: path.join(__dirname, 'preload.js'),
+            backgroundThrottling: false // v2.4.9: hidden window must not throttle timers or image loads
         } 
     });
     
@@ -889,7 +891,8 @@ function silentPrint(urlLoc, copies) {
         show: false, 
         webPreferences: { 
             partition: 'persist:tekmetric_session', 
-            preload: path.join(__dirname, 'preload.js') 
+            preload: path.join(__dirname, 'preload.js'),
+            backgroundThrottling: false // v2.4.9: hidden window must not throttle timers or image loads
         } 
     });
     
