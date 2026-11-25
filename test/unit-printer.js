@@ -1,0 +1,23 @@
+// v2.5.0: printer picker logic. Run: node test/unit-printer.js
+const assert = require('assert');
+const { resolvePrinter, printerMenuModel } = require('../printer-pick');
+const list = [{ name: 'Microsoft Print to PDF', displayName: 'Microsoft Print to PDF', isDefault: false }, { name: 'Brother MFC-L2750DW series Printer', displayName: 'Brother MFC-L2750DW series Printer', isDefault: true }];
+assert.deepStrictEqual(resolvePrinter('', list), { deviceName: undefined, label: 'System default', fellBack: false });
+assert.deepStrictEqual(resolvePrinter(undefined, list).deviceName, undefined);
+let r = resolvePrinter('Brother MFC-L2750DW series Printer', list);
+assert(r.deviceName === 'Brother MFC-L2750DW series Printer' && !r.fellBack);
+r = resolvePrinter('brother mfc-l2750dw series printer', list);
+assert(r.deviceName === 'Brother MFC-L2750DW series Printer');
+r = resolvePrinter('HP LaserJet 9000', list);
+assert(r.deviceName === undefined && r.fellBack && r.missing === 'HP LaserJet 9000');
+r = resolvePrinter('Anything', []);
+assert(r.deviceName === undefined && r.fellBack);
+r = resolvePrinter('Anything', null);
+assert(r.deviceName === undefined);
+let m = printerMenuModel('', list);
+assert(m.length === 3 && m[0].checked && m[0].name === '' && m[2].label.includes('Windows default'));
+m = printerMenuModel('Brother MFC-L2750DW series Printer', list);
+assert(!m[0].checked && m[2].checked && m.filter(x => x.checked).length === 1);
+m = printerMenuModel('Gone Printer', list);
+assert(m.length === 4 && m[3].checked && /not found/.test(m[3].label) && m.filter(x => x.checked).length === 1);
+console.log('PRINTER UNIT OK');

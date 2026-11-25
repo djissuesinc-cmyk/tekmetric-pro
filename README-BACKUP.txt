@@ -47,7 +47,21 @@ INSPECTION "NO FAULTS" WORDING (2.4.5)
   lines starting "no-faults". If something does not fill, the log includes a short snippet
   of the row and of whatever appeared after "Add finding" was clicked.
 
+AI (right-click: Fix Spelling & Grammar / Make Professional)  v2.5.0
+  Code: ai-request.js (request, retries, fallback models), ai-insert.js (puts the answer back in the field).
+  Model order: gemini-3.5-flash-lite, then gemini-3.8-flash, then gemini-2.5-flash-lite (edit DEFAULT_MODELS).
+  Each request is logged in the PDF log as "ai#N model=... status=... NNNms" (never the key or the text).
+  Key: Shop > Admin > System Settings (or GEMINI_API_KEY in .env, which is never committed).
+
+PRINTER (v2.5.0)
+  Shop > Print Settings > Printer. Saved per PC in settings.json as printerName ('' = System default).
+  Silent prints (Smart Print, inspection print, silent PDF) pass it as deviceName; a missing printer falls back to default.
+  The log line "printer=..." shows which one was used.
+
 TESTS (developer)
+  node test/unit-ai.js
+  node test/unit-printer.js
+  xvfb-run -a npx electron test/e2e-ai.js | e2e-ai-menu.js | e2e-printer.js
   node test/unit-phrases.js
   node test/unit-inspection.js
   node test/unit-intercept.js

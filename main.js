@@ -1,6 +1,8 @@
 const { app, BrowserWindow, Menu, dialog, ipcMain, protocol, net, session } = require('electron');
 const { autoUpdater } = require('electron-updater');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { createAiClient } = require('./ai-request');
+const { captureSrc, applySrc } = require('./ai-insert');
+const { resolvePrinter, printerMenuModel } = require('./printer-pick');
 const path = require('path');
 const fs = require('fs');
 const url = require('url');
@@ -217,7 +219,7 @@ function createWindow(targetUrl = 'https://shop.tekmetric.com/') {
     // Keep the build version visible in the title bar (Tekmetric sets its own page titles)
     win.on('page-title-updated', (e, t) => {
         e.preventDefault();
-        try { win.setTitle('Tekmetric Pro v' + app.getVersion() + (t ? ' - ' + t : '')); } catch (err) {}
+        try { win.setTitle('Tekmetric Pro v' + app.getVersion() + (t ? ' - ' + t : '') + (win._aiBusy ? AI_BUSY_SUFFIX : '')); } catch (err) {}
     });
     attachNavControls(win);
     try { instrumentPdfWindow(win, 'main', null); } catch (e) { pdfLog('instrument main failed: ' + e.message); }
@@ -249,25 +251,11 @@ function createWindow(targetUrl = 'https://shop.tekmetric.com/') {
         if (params.selectionText) {
             menuTemplate.push({
                 label: '✨ AI: Fix Spelling & Grammar',
-                click: async () => {
-                    const fixedText = await runGeminiSpellCheck(params.selectionText, win);
-                    if (fixedText && isAlive(win)) {
-                        const { clipboard } = require('electron');
-                        clipboard.writeText(fixedText);
-                        win.webContents.paste();
-                    }
-                }
+                click: () => runAiMenuAction(win, params.selectionText, runGeminiSpellCheck, 'spell')
             });
             menuTemplate.push({
                 label: '✨ AI: Make Professional',
-                click: async () => {
-                    const improvedText = await runGemini(params.selectionText, win);
-                    if (improvedText && isAlive(win)) {
-                        const { clipboard } = require('electron');
-                        clipboard.writeText(improvedText);
-                        win.webContents.paste();
-                    }
-                }
+                click: () => runAiMenuAction(win, params.selectionText, runGemini, 'pro')
             });
         }
         
@@ -371,6 +359,38 @@ function pdfLogFlush() {
 function pdfLog(msg) {
     _pdfLogBuf += new Date().toISOString() + ' ' + msg + '\n';
     if (!_pdfLogTimer) _pdfLogTimer = setTimeout(pdfLogFlush, 50);
+}
+
+// ---- v2.5.0: printer choice (Shop > Print Settings > Printer), saved per PC ----------------------
+let printerCache = { t: 0, list: null };
+async function getPrinters(wc, maxAgeMs = 5 * 60 * 1000) {
+    if (printerCache.list && Date.now() - printerCache.t < maxAgeMs) return printerCache.list;
+    try {
+        if (!wc || wc.isDestroyed()) return printerCache.list || [];
+        const list = await Promise.race([wc.getPrintersAsync(), new Promise((_, rej) => setTimeout(() => rej(new Error('timed out')), 3000))]);
+        printerCache = { t: Date.now(), list: Array.isArray(list) ? list : [] };
+    } catch (e) { pdfLog('getPrintersAsync failed: ' + e.message); }
+    return printerCache.list || [];
+}
+// Silent print on webContents wc. Passes the saved printer as deviceName; if it is not installed on this PC
+// (or Windows refuses it) the job goes to the default printer instead. Logs the printer used.
+async function printSilent(wc, base, tm, done) {
+    let pick = { deviceName: undefined, label: 'System default', fellBack: false };
+    try {
+        const saved = String(loadSettings().printerName || '').trim();
+        if (saved) pick = resolvePrinter(saved, await getPrinters(wc));
+        if (pick.fellBack) pdfLog(tm.id + ' saved printer "' + pick.missing + '" not found, using System default');
+    } catch (e) { pdfLog(tm.id + ' printer lookup failed: ' + e.message); }
+    if (!wc || wc.isDestroyed()) return;
+    pdfLog(tm.id + ' printer=' + pick.label + (pick.deviceName ? ' (deviceName set)' : ''));
+    const opts = pick.deviceName ? Object.assign({}, base, { deviceName: pick.deviceName }) : base;
+    wc.print(opts, (success, failureReason) => {
+        if (!success && pick.deviceName && !wc.isDestroyed()) {
+            pdfLog(tm.id + ' print to "' + pick.label + '" failed (' + failureReason + '), retrying on System default');
+            try { wc.print(base, done); return; } catch (e) {}
+        }
+        done(success, failureReason);
+    });
 }
 
 // ---- v2.4.8: print timing + faster waits ------------------------------------------------------
@@ -868,8 +888,8 @@ function checkAndPrintInspection(urlLoc) {
                 tm.mark('print layout');
                 if (!checkWin.isDestroyed()) {
                     tm.mark('print() called');
-                    checkWin.webContents.print(
-                        { silent: true, printBackground: true, copies: 1, duplexMode: 'longEdge' },
+                    printSilent(checkWin.webContents,
+                        { silent: true, printBackground: true, copies: 1, duplexMode: 'longEdge' }, tm,
                         (success, failureReason) => {
                             pdfLog(tm.id + ' print done success=' + success + (failureReason ? ' reason=' + failureReason : '') + ' (total ' + (Date.now() - tm.t0) + 'ms)');
                             setTimeout(closeCheck, 3000);
@@ -914,8 +934,8 @@ function silentPrint(urlLoc, copies) {
             tm.mark('print layout');
             if (!pWin.isDestroyed()) {
                 tm.mark('print() called');
-                pWin.webContents.print(
-                    { silent: true, printBackground: true, copies: parseInt(copies) || 1, duplexMode: 'longEdge' },
+                printSilent(pWin.webContents,
+                    { silent: true, printBackground: true, copies: parseInt(copies) || 1, duplexMode: 'longEdge' }, tm,
                     (success, failureReason) => {
                         pdfLog(tm.id + ' print done success=' + success + (failureReason ? ' reason=' + failureReason : '') + ' (total ' + (Date.now() - tm.t0) + 'ms)');
                         setTimeout(closeP, 3000);
@@ -949,30 +969,72 @@ async function runGemini(text, parentWin) {
     return (result && settings.autoCaps) ? result.toUpperCase() : result;
 }
 
+// ---- AI (v2.5.0) ---------------------------------------------------------------------------
+// All requests go through ai-request.js: hard timeout, retries with backoff, fallback models,
+// safe parsing, single request at a time. net.fetch uses Chromium's network stack, so the PC's
+// proxy settings apply (the old SDK used Node's fetch, which ignores them).
+const AI_BUSY_SUFFIX = '  -  AI working...';
+const aiFetch = (u, init) => {
+    try { return net.fetch(u, Object.assign({}, init, { bypassCustomProtocolHandlers: true })); }
+    catch (e) { return fetch(u, init); }
+};
+const aiClient = createAiClient({
+    fetch: aiFetch,
+    getKey: () => { const s = loadSettings(); return s.apiKey || process.env.GEMINI_API_KEY || ''; },
+    log: (m) => pdfLog(m)
+});
+
+function setAiBusy(win, busy) {
+    if (!isAlive(win)) return;
+    win._aiBusy = busy;
+    try {
+        const base = win.getTitle().replace(AI_BUSY_SUFFIX, '');
+        win.setTitle(busy ? base + AI_BUSY_SUFFIX : base);
+        win.setProgressBar(busy ? 2 : -1, busy ? { mode: 'indeterminate' } : undefined);
+    } catch (e) {}
+}
+
+let aiMenuBusy = false;
+async function runAiMenuAction(win, selectionText, runner, tag) {
+    // Set synchronously so a fast double click can never start two runs
+    if (aiMenuBusy) { pdfLog('ai ' + tag + ' ignored: a request is already running'); return; }
+    aiMenuBusy = true;
+    let out = null, captured = 'none';
+    const id = Date.now().toString(36);
+    try {
+        try { if (isAlive(win)) captured = await win.webContents.executeJavaScript(captureSrc(id)); } catch (e) {}
+        setAiBusy(win, true);
+        try { out = await runner(selectionText, win); }
+        finally { setAiBusy(win, false); }
+    } catch (e) {
+        pdfLog('ai ' + tag + ' unexpected error: ' + (e && e.message));
+    } finally { aiMenuBusy = false; }
+    if (!out || !isAlive(win)) return;
+    let how = 'none';
+    if (captured !== 'none') {
+        try { how = await win.webContents.executeJavaScript(applySrc(id, out)); } catch (e) { how = 'error:' + e.message; }
+    }
+    if (how !== 'inserted') {
+        // Field is gone or its text changed: fall back to pasting at the cursor, like before
+        pdfLog('ai ' + tag + ' insert=' + how + ', pasting at cursor');
+        const { clipboard } = require('electron');
+        clipboard.writeText(out);
+        win.webContents.paste();
+    } else {
+        pdfLog('ai ' + tag + ' insert=inserted');
+    }
+}
+
 async function processGeminiRequest(prompt, parentWin) {
-    const settings = loadSettings(); 
-    // Settings key first, then GEMINI_API_KEY from .env (dotenv is loaded but was never used)
-    const apiKey = settings.apiKey || process.env.GEMINI_API_KEY;
     const showErr = (opts) => {
         (isAlive(parentWin) ? dialog.showMessageBox(parentWin, opts) : dialog.showMessageBox(opts)).catch(() => {});
     };
-    
-    try {
-        if (!apiKey) {
-            showErr({ type: 'error', title: 'AI Offline', message: 'API key is missing. Please add it via Tools > System Settings.' });
-            return null;
-        }
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-        
-        const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('AI Request Timed Out')), 15000));
-        const result = await Promise.race([model.generateContent(prompt), timeout]);
-        
-        return result.response.text().trim();
-    } catch (err) {
-        showErr({ type: 'error', title: 'AI Server Error', message: 'Failed to process AI request.\n\nError: ' + (err && err.message ? err.message : String(err)) });
-        return null;
-    }
+    const r = await aiClient.request(prompt);
+    if (r.ok) return r.text;
+    if (r.kind === 'busy') return null; // second click while one request is running: ignored
+    if (r.kind === 'nokey') showErr({ type: 'error', title: 'AI Offline', message: r.message });
+    else showErr({ type: 'error', title: 'AI Server Error', message: 'Failed to process AI request.\n\n' + r.message });
+    return null;
 }
 
 function requireAdmin(callback) {
@@ -1060,7 +1122,7 @@ function openSettingsEditor() {
             <script>
                 const fs = require('fs');
                 document.getElementById('save').onclick = () => {
-                    const key = document.getElementById('api').value;
+                    const key = document.getElementById('api').value.trim();
                     try {
                         let set = JSON.parse(fs.readFileSync(${safePath}));
                         set.apiKey = key;
@@ -1256,6 +1318,15 @@ autoUpdater.on('update-downloaded', (info) => {
     }).then((result) => { if (result.response === 0) autoUpdater.quitAndInstall(); }).catch(() => {});
 });
 
+async function refreshPrinterMenu() {
+    const w = getMainWin();
+    if (!isAlive(w)) return;
+    const before = JSON.stringify((printerCache.list || []).map(p => p.name));
+    const list = await getPrinters(w.webContents, 0);
+    pdfLog('printers on this PC: ' + (list.map(p => p.name).join(' | ') || '(none)') + '; saved=' + (loadSettings().printerName || 'System default'));
+    if (JSON.stringify(list.map(p => p.name)) !== before) setupMenu();
+}
+
 function setupMenu() {
     let userMenu = [];
     try {
@@ -1282,6 +1353,17 @@ function setupMenu() {
             { label: 'New Window', accelerator: 'CmdOrCtrl+N', click: () => createWindow() },
             { type: 'separator' },
             { label: 'Print Settings', submenu: [
+                { label: 'Printer', submenu: printerMenuModel(s.printerName, printerCache.list).map(it => ({
+                    label: it.label, type: 'radio', checked: it.checked,
+                    click: () => {
+                        const cur = loadSettings();
+                        cur.printerName = it.name;
+                        fs.writeFileSync(settingsPath, JSON.stringify(cur, null, 2));
+                        pdfLog('printer choice saved: ' + (it.name || 'System default'));
+                        setupMenu();
+                    }
+                })).concat([{ type: 'separator' }, { label: 'Refresh Printer List', click: () => refreshPrinterMenu() }]) },
+                { type: 'separator' },
                 { label: 'Invoice Header: Shop Logo on Right', type: 'checkbox', checked: !!s.invoiceLogoRight, click: (item) => {
                     const cur = loadSettings();
                     cur.invoiceLogoRight = item.checked;
@@ -1627,8 +1709,8 @@ ipcMain.on('modify-pdf-blob-silent', async (event, arrayData, shopData, copies) 
             tm.mark('PDF viewer wait: ' + r.how);
             if (!isAlive(pdfWin)) return;
             tm.mark('print() called');
-            pdfWin.webContents.print(
-                { silent: true, printBackground: true, copies: parseInt(copies) || 1, duplexMode: 'longEdge' },
+            printSilent(pdfWin.webContents,
+                { silent: true, printBackground: true, copies: parseInt(copies) || 1, duplexMode: 'longEdge' }, tm,
                 (success, failureReason) => {
                     pdfLog(tm.id + ' silent print done success=' + success + (failureReason ? ' reason=' + failureReason : '') + ' (total ' + (Date.now() - tm.t0) + 'ms)');
                     if (failureReason) console.error("Silent Print failed:", failureReason);
@@ -1677,6 +1759,7 @@ app.whenReady().then(() => {
     } catch (e) {}
     createWindow();
     setupMenu();
+    setTimeout(() => refreshPrinterMenu().catch(() => {}), 2500); // fill the Printer menu without slowing startup
     refillSparePdfWin(4000); // idle hidden window for the print pop-up
     if (canAutoUpdate()) autoUpdater.checkForUpdates().catch(() => {});
 });
