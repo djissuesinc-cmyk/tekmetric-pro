@@ -153,6 +153,7 @@ function getMainWin() {
 
 const globalCSS = `
     #shop-logo-fixed { pointer-events: none !important; display: none !important; }
+    [data-testid="toggle-app-sidebar-menu"] { display: none !important; }
     
     ::-webkit-scrollbar { width: 8px; height: 8px; }
     ::-webkit-scrollbar-track { background: transparent !important; }

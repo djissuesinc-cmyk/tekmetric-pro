@@ -1783,6 +1783,10 @@ function injectCustomStyles() {
             text-decoration: none !important;
             width: 100%;
         }
+        /* v2.5.1: hide Tekmetric's left-nav hamburger (three lines next to the logo) */
+        [data-testid="toggle-app-sidebar-menu"] {
+            display: none !important;
+        }
     `;
     document.head.appendChild(style);
 }
@@ -2095,12 +2099,92 @@ function injectSidebarButtons() {
     document.body.appendChild(container); 
 }
 
+
+// v2.5.1: keep Tekmetric's left side nav expanded and hide the hamburger.
+// The button is data-testid="toggle-app-sidebar-menu". localStorage "sidebar" is
+// a JSON boolean (true = expanded, 256px; false = minimized, 70px + class "closed").
+// Do not touch ro-sidebar, "Collapse all", or the Quick Actions panel.
+const NAV_HAMBURGER_SEL = '[data-testid="toggle-app-sidebar-menu"]';
+let navExpandPending = false;
+let navExpandTries = 0;
+let navAttrObserver = null;
+let navPollTimer = null;
+let navLockTimer = null;
+
+function navHamburger() {
+    try { return document.querySelector(NAV_HAMBURGER_SEL); } catch (e) { return null; }
+}
+
+function navIsCollapsed() {
+    try {
+        const left = document.querySelector('.MuiDrawer-paperAnchorLeft');
+        if (left) {
+            if (left.classList.contains('closed')) return true;
+            const w = left.getBoundingClientRect().width;
+            if (w > 0 && w <= 90) return true;
+        }
+        if (document.querySelector('[class*="w-screen-minus-sidebar-minimized"]')) return true;
+        if (localStorage.getItem('sidebar') === 'false') return true;
+    } catch (e) {}
+    return false;
+}
+
+function navPersistExpanded() {
+    try {
+        if (localStorage.getItem('sidebar') === 'false') localStorage.setItem('sidebar', 'true');
+    } catch (e) {}
+}
+
+function scheduleLockNav() {
+    clearTimeout(navLockTimer);
+    navLockTimer = setTimeout(lockLeftNavExpanded, 50);
+}
+
+function watchLeftNav() {
+    const left = document.querySelector('.MuiDrawer-paperAnchorLeft');
+    const btn = navHamburger();
+    if (!btn && !left) {
+        if (navAttrObserver) { try { navAttrObserver.disconnect(); } catch (e) {} navAttrObserver = null; }
+        if (navPollTimer) { clearInterval(navPollTimer); navPollTimer = null; }
+        return;
+    }
+    if (left && !(navAttrObserver && navAttrObserver._el === left)) {
+        if (navAttrObserver) { try { navAttrObserver.disconnect(); } catch (e) {} }
+        navAttrObserver = new MutationObserver(scheduleLockNav);
+        navAttrObserver._el = left;
+        try { navAttrObserver.observe(left, { attributes: true, attributeFilter: ['class', 'style'] }); } catch (e) {}
+    }
+    if (!navPollTimer) navPollTimer = setInterval(lockLeftNavExpanded, 1000);
+}
+
+function lockLeftNavExpanded() {
+    if (isHiddenPrinter) return;
+    const btn = navHamburger();
+    const left = document.querySelector('.MuiDrawer-paperAnchorLeft');
+    if (!btn && !left) return;
+    watchLeftNav();
+
+    if (navIsCollapsed()) {
+        if (navExpandPending || navExpandTries >= 6) return;
+        navExpandPending = true;
+        navExpandTries += 1;
+        try { if (btn && typeof btn.click === 'function') btn.click(); } catch (e) {}
+        navPersistExpanded();
+        setTimeout(() => { navExpandPending = false; }, 600);
+    } else {
+        navExpandTries = 0;
+        navExpandPending = false;
+        navPersistExpanded();
+    }
+}
+
 let domTimer = null;
 
 const runEnhancements = () => {
     try {
         injectShopBranding();
         injectCustomStyles();
+        lockLeftNavExpanded();
         cleanUpInterface();
         crossOffFinishedJobs();
         syncJobBoardData();
