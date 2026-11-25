@@ -47,11 +47,17 @@ async function run(fn, args, local) {
 
 const toU8 = (b) => (b instanceof Uint8Array && !(b instanceof Buffer)) ? b : new Uint8Array(b);
 
-function prewarm() {
+function prewarm(opts) {
     try {
         const w = getWorker();
-        if (w) call('ping').catch(() => {});
+        if (w) call(opts ? 'warm' : 'ping', ...(opts ? [opts] : [])).catch(() => {});
     } catch (e) {}
+}
+// In-process fallback: keep each PNG's bytes (same object each time so the embed cache hits)
+const fileCache = new Map();
+function readCached(p) {
+    if (!fileCache.has(p)) fileCache.set(p, require('fs').readFileSync(p));
+    return fileCache.get(p);
 }
 
 module.exports = {
@@ -76,8 +82,8 @@ module.exports = {
                 flipHeader: flip, watermark: wm, opacity: (job && job.opacity) || 0.045,
                 logoPng: job.logoPng, watermarkPng: job.watermarkPng, header
             };
-            if (job.logoPath && !opts.logoPng) opts.logoPng = require('fs').readFileSync(job.logoPath);
-            if (job.watermarkPath && !opts.watermarkPng) opts.watermarkPng = require('fs').readFileSync(job.watermarkPath);
+            if (job.logoPath && !opts.logoPng) opts.logoPng = readCached(job.logoPath);
+            if (job.watermarkPath && !opts.watermarkPng) opts.watermarkPng = readCached(job.watermarkPath);
             const o = await direct.stampPdf(b, opts);
             return { bytes: o, headerFlipped: o.headerFlipped, docKind: kind || o.docKind, header, skipped: false };
         });

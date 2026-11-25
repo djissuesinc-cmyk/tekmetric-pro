@@ -2,7 +2,7 @@
 // does not re-decode logo-watermark.png / logo.png.
 const { parentPort } = require('worker_threads');
 const fs = require('fs');
-const { stampPdf, findHeader, detectKind } = require('./pdf-stamp');
+const { stampPdf, findHeader, detectKind, warm } = require('./pdf-stamp');
 
 const pngCache = new Map();
 function png(filePath) {
@@ -22,6 +22,8 @@ function resolveOpts(opts) {
 
 const fns = {
     ping: () => 'ok',
+    // v2.4.8: preload pdfjs/pdf-lib and decode + deflate the logo PNGs before the first print
+    warm: async (opts) => { const o = resolveOpts(opts); await warm(o.logoPng, o.watermarkPng); return 'warm'; },
     findHeader: (b) => findHeader(b),
     detectKind: (b, header, urlKind) => detectKind(b, header, urlKind),
     stampPdf: async (b, opts) => {

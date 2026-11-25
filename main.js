@@ -145,7 +145,7 @@ function getMainWin() {
     const focused = BrowserWindow.getFocusedWindow();
     if (focused && shop.includes(focused)) return focused;
     if (shop.length) return shop[0];
-    const wins = BrowserWindow.getAllWindows();
+    const wins = BrowserWindow.getAllWindows().filter(w => !w.__tekproSpare);
     return wins.find(w => w.title && w.title.includes("Tekmetric Pro")) || wins[0] || null;
 }
 
@@ -221,7 +221,7 @@ function createWindow(targetUrl = 'https://shop.tekmetric.com/') {
     });
     attachNavControls(win);
     try { instrumentPdfWindow(win, 'main', null); } catch (e) { pdfLog('instrument main failed: ' + e.message); }
-    win.on('closed', () => shopWindows.delete(win));
+    win.on('closed', () => { shopWindows.delete(win); if (!shopWindowOpen()) closeSparePdfWin(); });
 
     win.webContents.on('did-finish-load', () => {
         win.webContents.insertCSS(globalCSS).catch(() => {});
@@ -340,13 +340,13 @@ function watchChildForPdf(opener, child) {
     // Poll the about:blank document briefly for an embed/iframe/object with a blob src
     let tries = 0;
     const poll = setInterval(() => {
-        if (done || child.isDestroyed() || ++tries > 40) { clearInterval(poll); return; }
+        if (done || child.isDestroyed() || ++tries > 100) { clearInterval(poll); return; }
         const cur = wc.getURL();
         if (!isPdfWatchUrl(cur)) { clearInterval(poll); return; } // parts punchout — leave alone
         if (cur.startsWith('blob:')) { grab(cur, 'loaded'); return; }
         wc.executeJavaScript("(() => { const el = document.querySelector('embed[src^=\"blob:\"],iframe[src^=\"blob:\"],object[data^=\"blob:\"]'); return el ? (el.src || el.data) : ''; })()")
             .then(src => { if (src) grab(src, 'embedded'); }).catch(() => {});
-    }, 250);
+    }, 100);
     child.on('closed', () => clearInterval(poll));
 }
 
@@ -371,6 +371,112 @@ function pdfLogFlush() {
 function pdfLog(msg) {
     _pdfLogBuf += new Date().toISOString() + ' ' + msg + '\n';
     if (!_pdfLogTimer) _pdfLogTimer = setTimeout(pdfLogFlush, 50);
+}
+
+// ---- v2.4.8: print timing + faster waits ------------------------------------------------------
+// printTimer logs one line per stage ("print#3 stamp +85ms (total 412ms)") so the PDF log shows where
+// the time between pressing Print and the printer starting goes.
+let printSeq = 0;
+function printTimer(kind) {
+    const id = kind + '#' + (++printSeq);
+    const t0 = Date.now();
+    let last = t0;
+    return {
+        id, t0,
+        mark(stage, extra) {
+            const n = Date.now();
+            pdfLog(id + ' ' + stage + ' +' + (n - last) + 'ms (total ' + (n - t0) + 'ms)' + (extra ? ' ' + extra : ''));
+            last = n;
+        }
+    };
+}
+
+// Chrome's PDF viewer reports loadState_ 'success' once the document is up. Poll it instead of always
+// sleeping a fixed time. Never waits less than the viewer needs and never longer than before unless the
+// viewer says it is still loading: if the viewer can't be probed we fall back to the old fixed delay.
+function waitPdfViewerReady(wc, fallbackMs, capMs) {
+    return new Promise((resolve) => {
+        const started = Date.now();
+        let finished = false;
+        const done = (how) => { if (finished) return; finished = true; resolve({ how, ms: Date.now() - started }); };
+        const probe = async () => {
+            if (finished) return;
+            if (!wc || wc.isDestroyed()) return done('gone');
+            let state = 'unknown';
+            try {
+                const ext = wc.mainFrame.framesInSubtree.find(f => /^chrome-extension:/.test(f.url || ''));
+                if (ext) {
+                    state = await ext.executeJavaScript("(() => { const v = document.querySelector('pdf-viewer'); return v && typeof v.loadState_ === 'string' ? v.loadState_ : 'unknown'; })()");
+                }
+            } catch (e) { state = 'unknown'; }
+            if (finished) return;
+            const waited = Date.now() - started;
+            if (state === 'success') { setTimeout(() => done('viewer-ready'), 100); return; }
+            if (waited >= capMs) return done('cap');
+            if (waited >= fallbackMs && state !== 'loading') return done('fixed-fallback');
+            setTimeout(probe, 60);
+        };
+        setTimeout(probe, 30);
+    });
+}
+
+// Hidden live page (Smart Print): ready when images + fonts are loaded and the DOM has been quiet for a
+// moment, instead of a flat 1500 ms. minMs/maxMs bound it either way.
+const PAGE_SETTLE_JS = (minMs, quietMs, maxMs) => "new Promise((resolve) => {" +
+    "const t0 = Date.now(); let last = Date.now(); let n = 0;" +
+    "try { new MutationObserver(() => { last = Date.now(); n++; }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true }); } catch (e) {}" +
+    "const imgsDone = () => Array.from(document.images).every(i => i.complete);" +
+    "const tick = () => {" +
+    "  const now = Date.now();" +
+    "  const ready = document.readyState === 'complete' && imgsDone() && (now - last) >= " + quietMs + " && (document.body && document.body.innerText.trim().length > 20);" +
+    "  if ((now - t0 >= " + minMs + " && ready) || now - t0 >= " + maxMs + ") {" +
+    "    const f = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();" +
+    "    f.then(() => requestAnimationFrame(() => resolve({ ms: Date.now() - t0, mutations: n, timedOut: now - t0 >= " + maxMs + " }))).catch(() => resolve({ ms: Date.now() - t0, mutations: n }));" +
+    "    return;" +
+    "  }" +
+    "  setTimeout(tick, 50);" +
+    "};" +
+    "tick();" +
+"})";
+async function waitPageSettled(wc, minMs, quietMs, maxMs) {
+    try { return await wc.executeJavaScript(PAGE_SETTLE_JS(minMs, quietMs, maxMs)); }
+    catch (e) { await new Promise(r => setTimeout(r, maxMs)); return { ms: maxMs, error: String(e && e.message) }; }
+}
+
+// One idle hidden window kept ready for the print pop-up, so the next print doesn't pay window +
+// renderer start-up. Single use: it is closed after printing and a new one is made afterwards.
+// It is flagged so it is never treated as a real window (main window lookup, quit).
+let sparePdfWin = null;
+function makePdfWin() {
+    const w = new BrowserWindow({
+        width: 1000,
+        height: 900,
+        title: 'Leaside Document Output',
+        icon: path.join(__dirname, 'logo.png'),
+        autoHideMenuBar: true,
+        show: false
+    });
+    w.__tekproSpare = true;
+    return w;
+}
+function shopWindowOpen() { return Array.from(shopWindows).some(isAlive); }
+function refillSparePdfWin(delayMs) {
+    setTimeout(() => {
+        try {
+            if (isAlive(sparePdfWin) || !shopWindowOpen()) return;
+            sparePdfWin = makePdfWin();
+            sparePdfWin.loadURL('about:blank').catch(() => {});
+        } catch (e) { pdfLog('spare window failed: ' + (e && e.message)); }
+    }, delayMs || 0);
+}
+function closeSparePdfWin() {
+    const w = sparePdfWin; sparePdfWin = null;
+    try { if (isAlive(w)) w.destroy(); } catch (e) {}
+}
+function takePdfWin() {
+    const w = sparePdfWin; sparePdfWin = null;
+    if (isAlive(w)) { w.__tekproSpare = false; return { win: w, reused: true }; }
+    return { win: makePdfWin(), reused: false };
 }
 // v2.4.2: item-specific "No Faults" wording (preload is sandboxed, so the library lives here)
 const inspectionPhrases = require('./inspection-phrases');
@@ -535,9 +641,11 @@ async function captureBlobPdf(win, blobUrl, onPdf, shopData) {
 
 async function captureBlobPdfInner(win, blobUrl, onPdf, shopData) {
     if (!isAlive(win)) return;
+    const tRead = Date.now();
     try {
         // Only PDFs go to the print pop-up (readBlobFrom checks the %PDF magic bytes)
         const data = await readBlobFrom([win.webContents], blobUrl, 'capture');
+        pdfLog('print capture: blob read took ' + (Date.now() - tRead) + 'ms');
         if (!data) { pdfLog('not a readable PDF, left alone: ' + blobUrl); recentBlobUrls.delete(blobUrl); return; }
         if (onPdf) onPdf();
         const sd = Object.assign({}, shopData || {}, { docType: (shopData && shopData.docType && shopData.docType !== 'other') ? shopData.docType : docTypeFromUrl(win.webContents.getURL()) });
@@ -721,6 +829,7 @@ async function applyPrintLayout(win, docType) {
 }
 
 function checkAndPrintInspection(urlLoc) {
+    const tm = printTimer('smart-inspection');
     const printUrl = new URL(urlLoc);
     printUrl.searchParams.set('hiddenPrinter', 'true');
     printUrl.searchParams.set('copies', '1');
@@ -739,6 +848,7 @@ function checkAndPrintInspection(urlLoc) {
     
     checkWin.webContents.once('did-finish-load', () => {
         if (!isAlive(checkWin)) return;
+        tm.mark('did-finish-load');
         const current = checkWin.webContents.getURL();
         if (current.includes('error') || current.includes('dashboard')) {
             const win = getMainWin();
@@ -747,22 +857,30 @@ function checkAndPrintInspection(urlLoc) {
             closeCheck();
         } else {
             checkWin.webContents.insertCSS(globalCSS).catch(() => {});
-            setTimeout(async () => {
+            (async () => {
+                // v2.4.8: wait for the page to actually be ready instead of a flat 1500 ms
+                const st = await waitPageSettled(checkWin.webContents, 400, 350, 6000);
+                tm.mark('page settled', JSON.stringify(st));
+                if (!isAlive(checkWin)) return;
                 await applyPrintLayout(checkWin, 'inspection'); // v2.3.8: inspections get the faint watermark too
+                tm.mark('print layout');
                 if (!checkWin.isDestroyed()) {
+                    tm.mark('print() called');
                     checkWin.webContents.print(
                         { silent: true, printBackground: true, copies: 1, duplexMode: 'longEdge' },
                         (success, failureReason) => {
+                            pdfLog(tm.id + ' print done success=' + success + (failureReason ? ' reason=' + failureReason : '') + ' (total ' + (Date.now() - tm.t0) + 'ms)');
                             setTimeout(closeCheck, 3000);
                         }
                     );
                 }
-            }, 1500); 
+            })();
         }
     });
 }
 
 function silentPrint(urlLoc, copies) {
+    const tm = printTimer('smart-print');
     const printUrl = new URL(urlLoc);
     printUrl.searchParams.set('hiddenPrinter', 'true');
     printUrl.searchParams.set('copies', copies);
@@ -782,18 +900,26 @@ function silentPrint(urlLoc, copies) {
     pWin.webContents.once('did-finish-load', () => {
         if (!isAlive(pWin)) return;
         pWin.webContents.insertCSS(globalCSS).catch(() => {});
-        setTimeout(async () => {
+        tm.mark('did-finish-load');
+        (async () => {
+            // v2.4.8: wait for the page to actually be ready instead of a flat 1500 ms
+            const st = await waitPageSettled(pWin.webContents, 400, 350, 6000);
+            tm.mark('page settled', JSON.stringify(st));
+            if (!isAlive(pWin)) return;
             // Optional invoice header flip / work-order watermark (Tools menu), applied just before printing
             await applyPrintLayout(pWin, docTypeFromUrl(urlLoc));
+            tm.mark('print layout');
             if (!pWin.isDestroyed()) {
+                tm.mark('print() called');
                 pWin.webContents.print(
                     { silent: true, printBackground: true, copies: parseInt(copies) || 1, duplexMode: 'longEdge' },
                     (success, failureReason) => {
+                        pdfLog(tm.id + ' print done success=' + success + (failureReason ? ' reason=' + failureReason : '') + ' (total ' + (Date.now() - tm.t0) + 'ms)');
                         setTimeout(closeP, 3000);
                     }
                 );
             }
-        }, 1500);
+        })();
     });
 }
 
@@ -1313,8 +1439,9 @@ function installDocumentInterceptor(ses, name) {
     } catch (e) { pdfLog('network interceptor FAILED on ' + name + ': ' + (e && e.stack || e)); }
 }
 
-async function processPdfData(arrayData, shopData) {
+async function processPdfData(arrayData, shopData, tm) {
     shopData = shopData || {};
+    tm = tm || printTimer('pdf');
     const original = Buffer.from(arrayData);
     const settings = loadSettings();
     const urlKind = shopData.docType === 'inspection' ? 'inspection' : null;
@@ -1337,11 +1464,21 @@ async function processPdfData(arrayData, shopData) {
             kind = (r && r.docKind) || null;
             if (r && !r.skipped && r.bytes) buffer = Buffer.from(r.bytes);
             pdfLog('detected kind=' + kind + ' docType=' + shopData.docType + ' headerFlipped=' + !!(r && r.headerFlipped) + ' watermark=' + !!(r && !r.skipped && wantWm));
+            tm.mark('stamp (worker: header scan + logo/watermark)', 'in=' + original.length + 'B out=' + buffer.length + 'B');
         } catch (e) { pdfLog('stamp failed: ' + (e && e.stack || e)); console.error('PDF stamp failed, using original:', e); buffer = original; }
     } else {
         try { header = await findHeader(original); } catch (e) { header = null; }
         try { kind = await detectKind(original, header, urlKind); } catch (e) { kind = null; }
         pdfLog('detected kind=' + kind + ' docType=' + shopData.docType + ' headerFlipped=false watermark=false');
+        tm.mark('detect only (no stamping)');
+    }
+    // v2.4.8: when Tekmetric's own header is recognised nothing else is drawn, so don't parse and re-save
+    // the whole (already stamped, ~2 MB) PDF on the main thread just to write the same bytes back out.
+    if (header) {
+        const tempFast = path.join(app.getPath('temp'), `Leaside_RO_${Date.now()}.pdf`);
+        await fs.promises.writeFile(tempFast, buffer);
+        tm.mark('write temp file', buffer.length + 'B');
+        return tempFast;
     }
     const isWorkOrder = kind === 'workorder' || shopData.docType === 'repair';
     const pdfDoc = await PDFDocument.load(buffer);
@@ -1403,8 +1540,10 @@ async function processPdfData(arrayData, shopData) {
     }
 
     const pdfBytes = await pdfDoc.save();
+    tm.mark('client/vehicle box + save (no Tekmetric header found)');
     const tempPath = path.join(app.getPath('temp'), `Leaside_RO_${Date.now()}.pdf`);
-    fs.writeFileSync(tempPath, pdfBytes);
+    await fs.promises.writeFile(tempPath, pdfBytes);
+    tm.mark('write temp file', pdfBytes.length + 'B');
     return tempPath;
 }
 
@@ -1417,38 +1556,46 @@ ipcMain.on('modify-pdf-blob', (event, arrayData, shopData) => {
 });
 
 async function openPdfForPrint(arrayData, shopData) {
-    pdfLog('openPdfForPrint ' + (arrayData && arrayData.length) + ' bytes docType=' + (shopData && shopData.docType));
+    const tm = printTimer('print');
+    pdfLog(tm.id + ' openPdfForPrint ' + (arrayData && arrayData.length) + ' bytes docType=' + (shopData && shopData.docType));
     try {
-        const tempPath = await processPdfData(arrayData, shopData);
-        
-        const pdfWin = new BrowserWindow({
-            width: 1000, 
-            height: 900,
-            title: 'Leaside Document Output',
-            icon: path.join(__dirname, 'logo.png'),
-            autoHideMenuBar: true,
-            show: false 
-        });
-        
-        pdfWin.webContents.once('did-fail-load', () => { if (isAlive(pdfWin)) pdfWin.close(); });
+        // Start the window now (it is independent of the stamping) so its start-up overlaps the stamp
+        const { win: pdfWin, reused } = takePdfWin();
+        let tempPath;
+        try { tempPath = await processPdfData(arrayData, shopData, tm); }
+        catch (e) { if (isAlive(pdfWin)) pdfWin.destroy(); throw e; }
+        tm.mark('window ' + (reused ? 'ready (pre-warmed)' : 'created'));
+        refillSparePdfWin(1500);
+
+        // The window may still be finishing its about:blank warm-up: only react to the PDF's own load
+        const pwc = pdfWin.webContents;
+        const onFail = (e, code, desc, u, isMain) => { if (isMain === false || code === -3) return; if (isAlive(pdfWin)) pdfWin.close(); };
+        pwc.on('did-fail-load', onFail);
         pdfWin.loadURL(url.pathToFileURL(tempPath).toString()).catch(() => {});
-        
-        // once: don't open a second print dialog if the viewer fires load again
-        pdfWin.webContents.once('did-finish-load', () => {
+
+        // fires once for the PDF: don't open a second print dialog if the viewer fires load again
+        const onLoad = async () => {
             if (!isAlive(pdfWin)) return;
+            if (!/^file:/i.test(pwc.getURL())) return; // about:blank warm-up finished, not our PDF yet
+            pwc.removeListener('did-finish-load', onLoad);
+            pwc.removeListener('did-fail-load', onFail);
+            tm.mark('did-finish-load');
             pdfWin.show();
-            setTimeout(() => {
-                if (!isAlive(pdfWin)) return;
-                pdfWin.webContents.print(
-                    { silent: false, printBackground: true },
-                    (success, failureReason) => {
-                        setTimeout(() => {
-                            if (!pdfWin.isDestroyed()) pdfWin.close();
-                        }, 5000);
-                    }
-                );
-            }, 800);
-        });
+            const r = await waitPdfViewerReady(pdfWin.webContents, 800, 4000);
+            tm.mark('PDF viewer wait: ' + r.how);
+            if (!isAlive(pdfWin)) return;
+            tm.mark('print() called');
+            pdfWin.webContents.print(
+                { silent: false, printBackground: true },
+                (success, failureReason) => {
+                    pdfLog(tm.id + ' print dialog closed success=' + success + (failureReason ? ' reason=' + failureReason : '') + ' (total ' + (Date.now() - tm.t0) + 'ms)');
+                    setTimeout(() => {
+                        if (!pdfWin.isDestroyed()) pdfWin.close();
+                    }, 5000);
+                }
+            );
+        };
+        pwc.on('did-finish-load', onLoad);
 
     } catch (err) {
         pdfLog('openPdfForPrint error: ' + (err && err.stack || err));
@@ -1458,28 +1605,33 @@ async function openPdfForPrint(arrayData, shopData) {
 
 ipcMain.on('modify-pdf-blob-silent', async (event, arrayData, shopData, copies) => {
     if (!validPdfBytes(arrayData)) return;
+    const tm = printTimer('silent-blob');
     try {
-        const tempPath = await processPdfData(arrayData, shopData);
-        
         const pdfWin = new BrowserWindow({ 
             show: false, 
             webPreferences: { plugins: true } 
         });
+        let tempPath;
+        try { tempPath = await processPdfData(arrayData, shopData, tm); }
+        catch (e) { if (isAlive(pdfWin)) pdfWin.destroy(); throw e; }
         
         pdfWin.webContents.once('did-fail-load', () => { if (isAlive(pdfWin)) pdfWin.close(); });
         pdfWin.loadURL(url.pathToFileURL(tempPath).toString()).catch(() => {});
         
-        pdfWin.webContents.once('did-finish-load', () => {
-            setTimeout(() => {
-                if (!isAlive(pdfWin)) return;
-                pdfWin.webContents.print(
-                    { silent: true, printBackground: true, copies: parseInt(copies) || 1, duplexMode: 'longEdge' },
-                    (success, failureReason) => {
-                        if (failureReason) console.error("Silent Print failed:", failureReason);
-                        setTimeout(() => { if (isAlive(pdfWin)) pdfWin.close(); }, 3000);
-                    }
-                );
-            }, 1000);
+        pdfWin.webContents.once('did-finish-load', async () => {
+            tm.mark('did-finish-load');
+            const r = await waitPdfViewerReady(pdfWin.webContents, 1000, 4000);
+            tm.mark('PDF viewer wait: ' + r.how);
+            if (!isAlive(pdfWin)) return;
+            tm.mark('print() called');
+            pdfWin.webContents.print(
+                { silent: true, printBackground: true, copies: parseInt(copies) || 1, duplexMode: 'longEdge' },
+                (success, failureReason) => {
+                    pdfLog(tm.id + ' silent print done success=' + success + (failureReason ? ' reason=' + failureReason : '') + ' (total ' + (Date.now() - tm.t0) + 'ms)');
+                    if (failureReason) console.error("Silent Print failed:", failureReason);
+                    setTimeout(() => { if (isAlive(pdfWin)) pdfWin.close(); }, 3000);
+                }
+            );
         });
 
     } catch (err) {
@@ -1515,8 +1667,13 @@ app.whenReady().then(() => {
             '; log=' + pdfLogPath() + '; invoiceLogoRight=' + s0.invoiceLogoRight + ' workOrderWatermark=' + s0.workOrderWatermark +
             '; portable=' + (process.env.PORTABLE_EXECUTABLE_FILE || 'no'));
     } catch (e) { pdfLog('startup log error: ' + e.message); }
-    try { prewarmPdfWorker(); } catch (e) {}
+    try {
+        // v2.4.8: load pdfjs/pdf-lib and decode + deflate the logo PNGs now, not on the first print
+        const wmP = path.join(__dirname, fs.existsSync(path.join(__dirname, 'logo-watermark.png')) ? 'logo-watermark.png' : 'logo.png');
+        prewarmPdfWorker({ logoPath: path.join(__dirname, 'logo.png'), watermarkPath: wmP });
+    } catch (e) {}
     createWindow();
     setupMenu();
+    refillSparePdfWin(4000); // idle hidden window for the print pop-up
     if (canAutoUpdate()) autoUpdater.checkForUpdates().catch(() => {});
 });

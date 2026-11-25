@@ -1,7 +1,51 @@
 // Stamps Tekmetric invoice / estimate / work-order PDFs (Chrome "print" blobs).
 // Header regions are located from the PDF's own text positions (pdfjs-dist), so nothing is hard-coded.
 // stampPdf(bytes, {flipHeader, watermark, logoPng, watermarkPng, opacity}) -> Uint8Array
-const { PDFDocument, rgb } = require('pdf-lib');
+const zlib = require('zlib');
+const { PDFDocument, PDFImage, rgb } = require('pdf-lib');
+
+// v2.4.8: embedding the logo + watermark PNGs cost ~200ms of every print (decode + deflate of two
+// 665x625 RGBA images inside pdf.save()). The decoded image and its deflated streams are the same
+// every time, so keep them (keyed by the PNG bytes object, which the worker keeps per file path).
+const pngEmbedders = new WeakMap();
+function patchEmbedder(emb) {
+  let rgbZ = null, alphaZ = null;
+  emb.embedIntoContext = async function (context, ref) {
+    const img = this.image;
+    if (!rgbZ) {
+      rgbZ = zlib.deflateSync(img.rgbChannel);
+      if (img.alphaChannel) alphaZ = zlib.deflateSync(img.alphaChannel);
+    }
+    let SMask;
+    if (alphaZ) {
+      SMask = context.register(context.stream(alphaZ, {
+        Type: 'XObject', Subtype: 'Image', Height: img.height, Width: img.width,
+        BitsPerComponent: img.bitsPerComponent, ColorSpace: 'DeviceGray', Decode: [0, 1], Filter: 'FlateDecode'
+      }));
+    }
+    const xObject = context.stream(rgbZ, {
+      Type: 'XObject', Subtype: 'Image', BitsPerComponent: img.bitsPerComponent, Width: img.width,
+      Height: img.height, ColorSpace: this.colorSpace, SMask, Filter: 'FlateDecode'
+    });
+    if (ref) { context.assign(ref, xObject); return ref; }
+    return context.register(xObject);
+  };
+}
+async function embedPngCached(pdf, bytes) {
+  try {
+    let emb = bytes && typeof bytes === 'object' ? pngEmbedders.get(bytes) : null;
+    if (emb) {
+      const img = PDFImage.of(pdf.context.nextRef(), pdf, emb);
+      pdf.images.push(img);
+      return img;
+    }
+    const img = await pdf.embedPng(bytes);
+    if (bytes && typeof bytes === 'object' && img.embedder) { patchEmbedder(img.embedder); pngEmbedders.set(bytes, img.embedder); }
+    return img;
+  } catch (e) {
+    return pdf.embedPng(bytes); // never let the cache break a print
+  }
+}
 
 let pdfjs = null;
 function getPdfjs() {
@@ -52,7 +96,7 @@ async function stampPdf(bytes, opts = {}) {
   let headerFlipped = false, docKind = null;
 
   if (watermark && watermarkPng) {
-    const wm = await pdf.embedPng(watermarkPng);
+    const wm = await embedPngCached(pdf, watermarkPng);
     for (const p of pages) {
       const { width, height } = p.getSize();
       const w = Math.min(width * 0.62, 460), h = w * wm.height / wm.width;
@@ -76,7 +120,7 @@ async function stampPdf(bytes, opts = {}) {
       for (const l of hd.info) ro.push({ l, e: await emb(l.x0 - 1, l.x1 + 1, l.top - 0.5, l.bottom + 0.5) });
       const s = hd.shop;
       const shop = await emb(s.x0 - 1, s.x1 + 1, s.top - 0.5, s.bottom + 0.5);
-      const logo = await pdf.embedPng(logoPng);
+      const logo = await embedPngCached(pdf, logoPng);
 
       const bandTop = Math.min(s.top, hd.infoBox.top) - 12, bandBottom = Math.max(s.bottom, hd.infoBox.bottom) + 0.5;
       page.drawRectangle({ x: margin - 6, y: H(bandBottom), width: right - margin + 12, height: bandBottom - bandTop, color: rgb(1, 1, 1) });
@@ -117,4 +161,15 @@ async function detectKind(bytes, header, urlKind) {
   try { if (await isInspectionPdf(bytes)) return 'inspection'; } catch (e) {}
   return urlKind || null;
 }
-module.exports = { stampPdf, findHeader, detectKind, isInspectionPdf };
+// v2.4.8: touch everything a first print would load (pdfjs, pdf-lib, PNG decode + deflate) at startup
+async function warm(logoPng, watermarkPng) {
+  getPdfjs();
+  const d = await PDFDocument.create();
+  const pg = d.addPage([200, 200]);
+  if (logoPng) pg.drawImage(await embedPngCached(d, logoPng), { x: 0, y: 0, width: 10, height: 10 });
+  if (watermarkPng) pg.drawImage(await embedPngCached(d, watermarkPng), { x: 0, y: 0, width: 10, height: 10, opacity: 0.045 });
+  const bytes = await d.save();
+  try { await findHeader(bytes); } catch (e) {} // loads the pdfjs worker code path
+  return true;
+}
+module.exports = { stampPdf, findHeader, detectKind, isInspectionPdf, warm };

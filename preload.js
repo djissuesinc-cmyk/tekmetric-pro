@@ -2163,6 +2163,103 @@ window.addEventListener("DOMContentLoaded", () => {
     }
 });
 
+// ---- Auto-caps on blur (v2.4.8: never while a dropdown/autocomplete choice is being clicked) ----
+// Picking a supplier/part from a suggestion list: the text box blurs on mousedown, and the
+// click lands on mouseup. If we rewrite the box at that moment (input event) the page re-filters
+// or re-renders the list and the click is lost, so the choice needs a second click.
+// So auto-caps stays out of any field that belongs to a dropdown/autocomplete, and out of any
+// blur that is caused by a press inside a list / popper / portal.
+const ACP_POPUP_SEL = '[role="listbox"], [role="option"], [role="menu"], [role="menuitem"], [role="tree"], [role="grid"], ' +
+    '.MuiAutocomplete-popper, .MuiAutocomplete-listbox, .MuiAutocomplete-option, .MuiPopper-root, .MuiPopover-root, .MuiMenu-paper, .MuiMenu-root, ' +
+    '.MuiList-root, .MuiMenuItem-root, [data-radix-popper-content-wrapper], [data-radix-popper-content], [cmdk-list], [cmdk-item], ' +
+    '[class*="suggestion" i], [class*="autocomplete" i], [class*="dropdown" i], [class*="typeahead" i], [class*="combobox" i], [class*="listbox" i], ' +
+    '[class*="-menu" i][class*="select" i], [id*="listbox" i], [id*="autocomplete" i]';
+const ACP_FIELD_SEL = '.MuiAutocomplete-root, [role="combobox"], [role="search"][aria-owns], [data-testid*="autocomplete" i], ' +
+    '[class*="autocomplete" i], [class*="typeahead" i], [class*="combobox" i], [class*="react-select" i], [class*="select__control" i], [class*="suggest" i]';
+const ACP_OPEN_SEL = '[role="listbox"], .MuiAutocomplete-popper, .MuiAutocomplete-listbox';
+
+let acpLastDown = { target: null, t: 0 };
+const acpNoteDown = (e) => { acpLastDown = { target: e.target, t: Date.now() }; };
+document.addEventListener('pointerdown', acpNoteDown, true);
+document.addEventListener('mousedown', acpNoteDown, true);
+document.addEventListener('touchstart', acpNoteDown, true);
+
+function acpClosest(node, sel) {
+    try { return node && node.closest ? node.closest(sel) : null; } catch (e) { return null; }
+}
+function acpVisible(el) {
+    try {
+        if (!el || !el.isConnected) return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    } catch (e) { return false; }
+}
+// Top-level child of <body> that holds this node (MUI portals live there)
+function acpBodyChild(node) {
+    let n = node;
+    while (n && n.parentElement && n.parentElement !== document.body) n = n.parentElement;
+    return n || null;
+}
+// True when the field itself is part of an autocomplete / dropdown / combobox
+function acpIsAutocompleteField(el) {
+    if (el.getAttribute('role') === 'combobox' || el.hasAttribute('aria-haspopup') || el.hasAttribute('aria-autocomplete')) return true;
+    if (el.getAttribute('aria-expanded') === 'true') return true;
+    if (el.hasAttribute('list') || el.getAttribute('aria-controls')) {
+        const id = el.getAttribute('aria-controls') || el.getAttribute('aria-owns') || el.getAttribute('list');
+        if (id) {
+            const t = document.getElementById(id);
+            if (!t || t.matches('[role="listbox"], [role="menu"], [role="tree"], [role="grid"], datalist, ul, ol') || t.querySelector('[role="option"]')) return true;
+        }
+    }
+    if (el.hasAttribute('aria-owns')) return true;
+    if (acpClosest(el, ACP_FIELD_SEL)) return true;
+    const testid = ((el.getAttribute('data-testid') || '') + ' ' + (el.name || '') + ' ' + (el.id || '')).toLowerCase();
+    if (/autocomplete|combobox|typeahead|supplier|vendor/.test(testid)) return true;
+    return false;
+}
+// True when the blur is caused by a press / focus move into a list, option, popper or portal
+function acpMovingIntoPopup(el, related) {
+    const targets = [];
+    if (related) targets.push(related);
+    if (acpLastDown.target && Date.now() - acpLastDown.t < 800) targets.push(acpLastDown.target);
+    const mine = acpBodyChild(el);
+    for (const t of targets) {
+        if (!t || t === el) continue;
+        if (acpClosest(t, ACP_POPUP_SEL)) return true;
+        // Pressed something inside a different body-level portal than the field's own
+        const theirs = acpBodyChild(t);
+        if (theirs && mine && theirs !== mine && theirs.nodeType === 1 && theirs.id !== 'leaside-sidebar-tools' && theirs.id !== 'shop-logo-fixed' &&
+            !/^(SCRIPT|STYLE|IMG|LINK|NOSCRIPT)$/.test(theirs.tagName)) {
+            return true;
+        }
+    }
+    return false;
+}
+// Weak signal: the press landed on one item of a repeated list (siblings of the same tag), e.g. a
+// suggestion list built from plain divs/li with no ARIA or class names. Not a button/field/link.
+function acpPressedListItem(t) {
+    let n = t;
+    for (let i = 0; n && n.nodeType === 1 && i < 4; i++, n = n.parentElement) {
+        if (/^(BUTTON|INPUT|TEXTAREA|SELECT|A|LABEL|BODY|HTML|TD|TH|TR)$/.test(n.tagName)) return false;
+        const p = n.parentElement;
+        if (!p || p === document.body) return false;
+        let same = 0;
+        for (const c of p.children) if (c.tagName === n.tagName) same++;
+        if (same >= 2 && p.children.length <= 60 && (n.textContent || '').trim().length > 0) return true;
+    }
+    return false;
+}
+function acpListOpen() {
+    try {
+        const nodes = document.querySelectorAll(ACP_OPEN_SEL);
+        for (const n of nodes) if (acpVisible(n)) return true;
+    } catch (e) {}
+    return false;
+}
+function acpShouldSkip(el, related) {
+    return acpIsAutocompleteField(el) || acpMovingIntoPopup(el, related) || acpListOpen();
+}
+
 document.addEventListener('focusout', (event) => {
     if (nfBusy || nfSuppressAutoCaps) return;
     if (!appSettings.autoCaps) return;
@@ -2170,12 +2267,30 @@ document.addEventListener('focusout', (event) => {
     if (!el || !el.tagName) return;
     if (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && (el.type === 'text' || el.type === 'search'))) {
         if (el.type === 'password' || (el.name || "").toLowerCase().includes('email')) return;
-        
-        if (el.getAttribute('role') === 'combobox' || el.hasAttribute('aria-haspopup') || el.hasAttribute('aria-autocomplete')) {
+
+        if (window.location.href.toLowerCase().includes('partstech')) {
             return;
         }
 
-        if (window.location.href.toLowerCase().includes('partstech')) {
+        // Dropdown / autocomplete fields (supplier, part, vendor lists): leave the value alone
+        // so the first click on a suggestion registers.
+        if (acpShouldSkip(el, event.relatedTarget)) return;
+
+        // The blur was caused by a press on an item of some plain list: let the click finish first,
+        // then apply the capitals (the click is not interrupted; the choice sets the value itself).
+        const pressed = (acpLastDown.target && Date.now() - acpLastDown.t < 800) ? acpLastDown.target : null;
+        if (pressed && pressed !== el && acpPressedListItem(pressed)) {
+            const apply = () => {
+                try {
+                    if (!el.isConnected || !el.value || document.activeElement === el) return;
+                    const up = el.value.toUpperCase();
+                    if (el.value !== up) forceNativeInput(el, up, true);
+                } catch (e) {}
+            };
+            let done = false;
+            const once = () => { if (done) return; done = true; document.removeEventListener('click', once, true); setTimeout(apply, 0); };
+            document.addEventListener('click', once, true);
+            setTimeout(once, 700);
             return;
         }
 
