@@ -17,6 +17,7 @@ const TEK_HOST_RE = /^https:\/\/([a-z0-9-]+\.)*tekmetric\.com\//i;
 function kindFromUrl(u) {
     const p = String(u).split(/[?#]/)[0].toLowerCase();
     if (/\/work-?order\b/.test(p)) return 'workorder';
+    if (/\/repair$/.test(p)) return 'workorder';
     if (/\/invoice\b/.test(p)) return 'invoice';
     if (/\/estimate\b/.test(p)) return 'estimate';
     if (/\/(inspections?|dvi)\b/.test(p)) return 'inspection';

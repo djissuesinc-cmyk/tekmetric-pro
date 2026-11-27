@@ -9,6 +9,7 @@ const stamp = async (buf, info) => { const h = await findHeader(buf); const k = 
   return Buffer.from(await stampPdf(buf, { flipHeader: fl, watermark: wm, opacity: 0.045, logoPng: logo, watermarkPng: wmk })); };
 (async () => {
   assert.equal(kindFromUrl('https://shop.tekmetric.com/document/shop/1/repair-order/x/work-order?tz=a'), 'workorder');
+  assert.equal(kindFromUrl('https://shop.tekmetric.com/document/shop/1/repair-order/x/repair?tz=a'), 'workorder');
   assert.equal(kindFromUrl('https://shop.tekmetric.com/document/shop/1/repair-order/x/invoice?tz=a'), 'invoice');
   for (const [f, seg] of [['invoice.pdf', 'invoice'], ['workorder.pdf', 'work-order']]) {
     const pdf = fs.readFileSync('/workspace/realpdf/' + f);

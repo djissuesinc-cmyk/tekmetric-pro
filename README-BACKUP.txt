@@ -96,6 +96,11 @@ BUG REPORTS (v2.5.4)
   from /document/ load natively (without the logo stamp on that path). Blob
   print stamping still runs.
 
+  v2.5.7: /document/ PDFs still load natively (so the viewer works), then the
+  app fetches the same file with the shop session, stamps the logo header and
+  watermark, and swaps in a temp file the viewer can open. If stamping fails,
+  the original PDF stays on screen. Blob print stamping is unchanged.
+
 TESTS (developer)
   node test/unit-ai.js
   node test/unit-printer.js
@@ -109,3 +114,4 @@ TESTS (developer)
   node test/unit-intercept.js
   node test/unit-nav-fetch.js
   node test/unit-bug-report.js
+  node test/unit-doc-stamp.js

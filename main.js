@@ -15,6 +15,7 @@ const { stampPdf, findHeader, detectKind, stampJob, prewarm: prewarmPdfWorker } 
 const { brandCss, brandHeader, signboardCss, signboardHeader } = require('./brand');
 const { settingsEditorHtml } = require('./settings-html');
 const { kindFromUrl, DOC_RE, installDocumentInterceptor } = require('./doc-intercept');
+const { createDocumentPdfStamper } = require('./doc-stamp-window');
 const os = require('os');
 // Bulletproof startup marker: written synchronously on 'ready' to every candidate folder
 app.on('ready', () => {
@@ -588,7 +589,13 @@ function instrumentPdfWindow(win, label, opener) {
         else if (!isMain && isPdfWatchUrl(wc.getURL())) pdfLog(id + ' did-frame-navigate ' + u);
     });
     wc.on('dom-ready', inject);
-    wc.on('did-finish-load', () => { pdfLog(id + ' did-finish-load ' + wc.getURL()); inject(); detect('did-finish-load'); htmlDocWatermark(wc, id); });
+    wc.on('did-finish-load', () => {
+        pdfLog(id + ' did-finish-load ' + wc.getURL());
+        inject();
+        detect('did-finish-load');
+        htmlDocWatermark(wc, id);
+        applyDocumentPdfStamp(wc).catch((e) => pdfLog(id + ' document stamp apply error: ' + (e && e.message)));
+    });
     wc.on('did-fail-load', (e, code, desc, u) => pdfLog(id + ' did-fail-load ' + code + ' ' + desc + ' ' + u));
     wc.on('render-process-gone', (e, d) => pdfLog(id + ' render-process-gone ' + (d && d.reason)));
     inject();
@@ -885,6 +892,8 @@ function checkAndPrintInspection(urlLoc) {
         } else {
             checkWin.webContents.insertCSS(globalCSS).catch(() => {});
             (async () => {
+                try { await applyDocumentPdfStamp(checkWin.webContents); } catch (e) { pdfLog(tm.id + ' document stamp apply error: ' + (e && e.message)); }
+                if (!isAlive(checkWin)) return;
                 // v2.4.8: wait for the page to actually be ready instead of a flat 1500 ms
                 const st = await waitPageSettled(checkWin.webContents, 400, 350, 6000);
                 tm.mark('page settled', JSON.stringify(st));
@@ -930,6 +939,8 @@ function silentPrint(urlLoc, copies) {
         pWin.webContents.insertCSS(globalCSS).catch(() => {});
         tm.mark('did-finish-load');
         (async () => {
+            try { await applyDocumentPdfStamp(pWin.webContents); } catch (e) { pdfLog(tm.id + ' document stamp apply error: ' + (e && e.message)); }
+            if (!isAlive(pWin)) return;
             // v2.4.8: wait for the page to actually be ready instead of a flat 1500 ms
             const st = await waitPageSettled(pWin.webContents, 400, 350, 6000);
             tm.mark('page settled', JSON.stringify(st));
@@ -1629,11 +1640,29 @@ async function networkStamp(buf, info) {
 // bodies and followed redirects; Chromium handles them natively again.
 // v2.5.6: debugger Fetch stamping of /document/ PDFs is off (viewer failed to
 // load the file). Those PDFs load natively; blob print stamping still runs.
+// v2.5.7: after a /document/ PDF loads natively, fetch the bytes with the
+// window's session cookies, stamp them, and swap in a file:// temp PDF so the
+// built-in viewer still works. If that fails, the original PDF stays on screen.
 function installShopDocumentInterceptor(ses, name) {
     try {
         installDocumentInterceptor(ses, name, { stamp: networkStamp, log: pdfLog });
     } catch (e) { pdfLog('network interceptor FAILED on ' + name + ': ' + (e && e.stack || e)); }
 }
+
+const applyDocumentPdfStamp = createDocumentPdfStamper({
+    log: (m) => pdfLog(m),
+    stamp: (buf, info) => networkStamp(buf, info),
+    fetch: async (u, wc) => {
+        const res = await wc.session.fetch(u, { bypassCustomProtocolHandlers: true, credentials: 'include' });
+        if (!res || !res.ok) throw new Error('HTTP ' + (res && res.status));
+        return Buffer.from(await res.arrayBuffer());
+    },
+    writeTemp: async (buf) => {
+        const tempPath = path.join(app.getPath('temp'), 'Leaside_RO_' + Date.now() + '.pdf');
+        await fs.promises.writeFile(tempPath, buf);
+        return tempPath;
+    }
+});
 
 async function processPdfData(arrayData, shopData, tm) {
     shopData = shopData || {};
