@@ -58,10 +58,35 @@ PRINTER (v2.5.0)
   Silent prints (Smart Print, inspection print, silent PDF) pass it as deviceName; a missing printer falls back to default.
   The log line "printer=..." shows which one was used.
 
+
+QUICK JOBS INSERT (v2.5.2)
+  Clicking a Quick Actions preset (sidebar or Edit > Insert) writes into the last text box you clicked.
+  In a textarea each job is a new line starting with "+ ". Combined presets such as
+  "LOF, 30 POINT INSPECTION + BRAKE INSPECTION" are split on commas and pluses, except
+  inside parentheses (the Level 2 / 3 Scan item stays one line). Single-line inputs still
+  join with " + " because they cannot hold newlines.
+
+ABOUT WINDOW (v2.5.2 / v2.5.3)
+  Help > About System shows the current app version, what Tekmetric Pro is, a short list
+  of what it does, and the keyboard shortcuts.
+  v2.5.3: the About window and Shop > Admin > System Settings use the shop signboard
+  look (badge logo, "CRAIG'S LEASIDE AUTOMOTIVE" with Leaside in red, tagline, charcoal
+  panels with a red trim). Fonts (Oswald and Inter, SIL OFL) live in assets/fonts and
+  are embedded so the windows work offline.
+
+RESET PRINT SPOOLER (v2.5.2)
+  Shop > Print Settings > Reset Print Spooler... (Windows only). Confirms first, then
+  asks Windows for admin permission, stops the spooler, clears stuck jobs, and starts it
+  again. The result is written to the PDF log.
+
 TESTS (developer)
   node test/unit-ai.js
   node test/unit-printer.js
-  xvfb-run -a npx electron test/e2e-ai.js | e2e-ai-menu.js | e2e-printer.js
+  node test/unit-inject.js
+  node test/unit-about.js
+  node test/unit-spooler.js
+  node test/unit-settings.js
+  xvfb-run -a npx electron test/e2e-ai.js | e2e-ai-menu.js | e2e-printer.js | e2e-inject.js | e2e-about.js | e2e-admin.js
   node test/unit-phrases.js
   node test/unit-inspection.js
   node test/unit-intercept.js

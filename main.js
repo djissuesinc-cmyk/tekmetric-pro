@@ -3,12 +3,16 @@ const { autoUpdater } = require('electron-updater');
 const { createAiClient } = require('./ai-request');
 const { captureSrc, applySrc } = require('./ai-insert');
 const { resolvePrinter, printerMenuModel } = require('./printer-pick');
+const { aboutHtml } = require('./about-info');
+const { resetPrintSpooler } = require('./spooler-reset');
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const url = require('url');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 const { stampPdf, findHeader, detectKind, stampJob, prewarm: prewarmPdfWorker } = require('./pdf-async'); // v2.3.9: long-lived worker + combined stampJob
-const { brandCss, brandHeader } = require('./brand');
+const { brandCss, brandHeader, signboardCss, signboardHeader } = require('./brand');
+const { settingsEditorHtml } = require('./settings-html');
 const { makeSessionFetch } = require('./nav-fetch');
 const { makeHttpsHandler, kindFromUrl, DOC_RE } = require('./doc-intercept');
 const os = require('os');
@@ -1101,41 +1105,23 @@ function requireAdmin(callback) {
 function openSettingsEditor() {
     const parentWin = getMainWin();
     const win = new BrowserWindow({ 
-        width: 600, height: 470, 
+        width: 640, height: 540, 
         parent: parentWin || undefined, 
         modal: !!parentWin, 
         alwaysOnTop: true,
         autoHideMenuBar: true, title: "API Settings", icon: path.join(__dirname, 'logo.png'),
-        backgroundColor: '#121212', 
+        backgroundColor: '#0d0e11', 
         webPreferences: { nodeIntegration: true, contextIsolation: false } 
     });
     const s = loadSettings();
     const safePath = jsLiteral(settingsPath);
     
-    const html = `
-        ${brandCss()}<body style="font-family: sans-serif; padding: 20px; background: #121212; color: #e0e0e0;">
-            ${brandHeader(44)}
-            <h2 style="text-align:center;margin-top:0">System Settings</h2>
-            <label>Gemini API Key:</label><br>
-            <input type="password" id="api" value="${escapeHtml(s.apiKey || '')}" style="width: 100%; padding: 8px; margin-top: 5px; margin-bottom: 20px; background: #222; color: #fff; border: 1px solid #444;">
-            <button id="save" style="padding: 10px 20px; background: #d32f2f; color: #fff; border: none; cursor: pointer;">Save Settings</button>
-            <p id="msg" style="color: #4caf50; font-weight: bold; margin-top: 15px;"></p>
-            <script>
-                const fs = require('fs');
-                document.getElementById('save').onclick = () => {
-                    const key = document.getElementById('api').value.trim();
-                    try {
-                        let set = JSON.parse(fs.readFileSync(${safePath}));
-                        set.apiKey = key;
-                        fs.writeFileSync(${safePath}, JSON.stringify(set, null, 2));
-                        document.getElementById('msg').innerText = 'Settings saved successfully. Close this window to continue.';
-                    } catch (e) {
-                        document.getElementById('msg').innerText = 'Could not save settings: ' + e.message;
-                    }
-                };
-            </script>
-        </body>
-    `;
+    const html = settingsEditorHtml({
+        css: signboardCss(),
+        header: signboardHeader(),
+        apiKey: s.apiKey || '',
+        settingsPathLiteral: safePath
+    });
     win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
 }
 
@@ -1224,42 +1210,58 @@ function openPresetsEditor() {
 function openAboutWindow() {
     const parentWin = getMainWin();
     const aboutWin = new BrowserWindow({
-        width: 450, height: 760, 
+        width: 560, height: 820, 
         parent: parentWin || undefined, 
         modal: !!parentWin, 
         alwaysOnTop: true,
         title: 'About System', icon: path.join(__dirname, 'logo.png'),
-        autoHideMenuBar: true, resizable: false, backgroundColor: '#0d0d0d',
+        autoHideMenuBar: true, resizable: false, backgroundColor: '#0d0e11',
         webPreferences: { nodeIntegration: false, contextIsolation: true }
     });
 
-    const htmlContent = `
-        ${brandCss()}<body style="font-family: 'Segoe UI', Tahoma, sans-serif; background-color: #0d0d0d; color: #e0e0e0; margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden;">
-            <div style="flex: 1; padding: 40px 30px; text-align: center;">
-                <img src="${logoDataUrl()}" style="width: 140px; margin-bottom: 16px; filter: drop-shadow(0 4px 12px rgba(211,47,47,0.35));">
-                <h1 style="margin: 0; font-size: 26px; color: #ffffff; letter-spacing: 1px;">Tekmetric Pro</h1>
-                <p style="color: #ef5350; margin-top: 5px; font-size: 13px; font-weight: bold; text-transform: uppercase;">Version ${app.getVersion()}</p>
-                <div style="margin: 30px 0; border-top: 1px solid #222; border-bottom: 1px solid #222; padding: 20px 0;">
-                    <p style="margin: 0; font-size: 14px; line-height: 1.5; color: #bbb;">
-                        Engineered specifically to automate workflow operations and integrate local AI diagnostic assistance.
-                    </p>
-                </div>
-                <p style="font-size: 12px; color: #888; margin-bottom: 0;">
-                    Developed by Shawn Bradbury<br>
-                    <strong>Craig's Leaside Automotive Inc.</strong>
-                </p>
-                <p style="font-size: 12px; color: #ef5350; margin: 8px 0 4px; letter-spacing: 1px;">Parts &middot; Service &middot; Tires</p>
-                <p style="font-size: 11px; color: #888; margin: 0; line-height: 1.6;">416-421-3030 &middot; info@craigsleaside.com<br>craigsleaside.com</p>
-            </div>
-            <div style="background: #151515; padding: 20px 30px 10px 30px; border-top: 1px solid #2a2a2a; font-size: 10px; color: #666; text-align: justify; line-height: 1.4;">
-                <strong style="color: #888;">LEGAL DISCLAIMER:</strong> This software operates as a standalone container alongside Tekmetric. It does not reflect the views or official software of Tekmetric. Unauthorized distribution or deployment outside of the authorized facility is prohibited.
-            </div>
-            <div style="background: #151515; padding-bottom: 25px; text-align: center;">
-                <button onclick="window.close()" style="background-color: #E30613; color: #ffffff; border: none; padding: 10px 30px; border-radius: 4px; font-weight: bold; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; font-size: 13px;">Acknowledged</button>
-            </div>
-        </body>
-    `;
+    const htmlContent = aboutHtml(app.getVersion(), { css: signboardCss(), header: signboardHeader() });
     aboutWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(htmlContent));
+}
+
+const SPOOLER_CONFIRM = 'This clears all stuck print jobs on this PC and restarts printing. Windows will ask for admin permission.';
+let spoolerResetBusy = false;
+
+async function resetPrintSpoolerFromMenu() {
+    if (process.platform !== 'win32') return;
+    if (spoolerResetBusy) return;
+    const win = getMainWin();
+    const opt = {
+        type: 'question',
+        title: 'Reset Print Spooler',
+        message: SPOOLER_CONFIRM,
+        buttons: ['Reset Print Spooler', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true
+    };
+    const result = win ? await dialog.showMessageBox(win, opt) : await dialog.showMessageBox(opt);
+    if (!result || result.response !== 0) return;
+    spoolerResetBusy = true;
+    pdfLog('print spooler reset requested');
+    try {
+        const r = await resetPrintSpooler({ platform: process.platform, spawn, log: pdfLog });
+        pdfLog('print spooler reset result: kind=' + r.kind + (r.out ? ' out=' + String(r.out).slice(0, 200) : '') + (r.code != null ? ' code=' + r.code : ''));
+        const done = {
+            type: r.ok ? 'info' : 'warning',
+            title: 'Reset Print Spooler',
+            message: r.message || (r.ok ? 'Print spooler reset, printing is ready' : 'Could not reset the print spooler.')
+        };
+        if (win && isAlive(win)) await dialog.showMessageBox(win, done);
+        else await dialog.showMessageBox(done);
+    } catch (e) {
+        const msg = 'Could not reset the print spooler. ' + (e && e.message ? e.message : String(e));
+        pdfLog('print spooler reset error: ' + msg);
+        const done = { type: 'warning', title: 'Reset Print Spooler', message: msg };
+        if (win && isAlive(win)) await dialog.showMessageBox(win, done);
+        else await dialog.showMessageBox(done);
+    } finally {
+        spoolerResetBusy = false;
+    }
 }
 
 ipcMain.on('restart-app', () => {
@@ -1364,6 +1366,8 @@ function setupMenu() {
                         setupMenu();
                     }
                 })).concat([{ type: 'separator' }, { label: 'Refresh Printer List', click: () => refreshPrinterMenu() }]) },
+                { type: 'separator' },
+                { label: 'Reset Print Spooler...', visible: process.platform === 'win32', click: () => { resetPrintSpoolerFromMenu().catch((e) => { try { pdfLog('print spooler reset menu error: ' + (e && e.message ? e.message : e)); } catch (err) {} }); } },
                 { type: 'separator' },
                 { label: 'Invoice Header: Shop Logo on Right', type: 'checkbox', checked: !!s.invoiceLogoRight, click: (item) => {
                     const cur = loadSettings();

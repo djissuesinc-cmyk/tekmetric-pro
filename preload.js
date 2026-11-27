@@ -7,6 +7,57 @@ const isHiddenPrinter = window.location.search.includes('hiddenPrinter=true');
 let appSettings = ipcRenderer.sendSync('get-settings');
 let lastActiveInput = null;
 
+// Keep in sync with inject-text.js (unit tests load that file). Inlined here
+// because the preload runs sandboxed and cannot require a local module.
+function splitPresetParts(text) {
+    const parts = [];
+    let buf = '';
+    let depth = 0;
+    const s = String(text == null ? '' : text);
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (ch === '(') {
+            depth++;
+            buf += ch;
+        } else if (ch === ')') {
+            if (depth > 0) depth--;
+            buf += ch;
+        } else if (depth === 0 && (ch === ',' || ch === '+')) {
+            const t = buf.trim();
+            if (t) parts.push(t);
+            buf = '';
+        } else {
+            buf += ch;
+        }
+    }
+    const t = buf.trim();
+    if (t) parts.push(t);
+    return parts;
+}
+
+function stripTrailingSeps(value) {
+    return String(value == null ? '' : value).replace(/[\s+,]+$/, '');
+}
+
+function nextInjectValue(currentVal, textToInsert, multiline) {
+    if (multiline) {
+        const parts = splitPresetParts(textToInsert);
+        if (!parts.length) return stripTrailingSeps(currentVal);
+        const block = parts.map(p => '+ ' + p).join('\n');
+        const cur = stripTrailingSeps(currentVal);
+        return cur ? (cur + '\n' + block) : block;
+    }
+    let cur = String(currentVal == null ? '' : currentVal).trim();
+    if (cur !== '' && !cur.endsWith('+') && !cur.endsWith(',')) {
+        cur += ' + ';
+    } else if (cur !== '') {
+        cur += ' ';
+    }
+    return cur + textToInsert + ' + ';
+}
+
+// Quick Actions insert targets INPUT and TEXTAREA only. Contenteditable is not
+// tracked, so injectText does not apply there (forceNativeInput writes .value).
 document.addEventListener('focusin', (e) => {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
         lastActiveInput = e.target;
@@ -45,15 +96,11 @@ function forceNativeInput(el, val, isAutoCaps = false) {
 
 const injectText = (textToInsert) => {
     if (lastActiveInput && document.body.contains(lastActiveInput)) {
-        let currentVal = (lastActiveInput.value || "").trim();
-        
-        if (currentVal !== "" && !currentVal.endsWith('+') && !currentVal.endsWith(',')) {
-            currentVal += " + ";
-        } else if (currentVal !== "") {
-            currentVal += " ";
-        }
-        
-        const newVal = currentVal + textToInsert + " + ";
+        // Textareas get one "+ PART" line per job. Single-line inputs keep the
+        // old " + " joining (they cannot hold newlines). Auto-caps still runs
+        // on blur and uppercases the whole value, including the new lines.
+        const multiline = lastActiveInput.tagName === 'TEXTAREA';
+        const newVal = nextInjectValue(lastActiveInput.value || '', textToInsert, multiline);
         forceNativeInput(lastActiveInput, newVal);
         lastActiveInput.focus();
     } else {
