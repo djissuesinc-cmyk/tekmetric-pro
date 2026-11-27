@@ -1627,6 +1627,8 @@ async function networkStamp(buf, info) {
 // iframe cookies (ProDemand 401) and can break CORS (fonts.gstatic ERR_FAILED).
 // Punchouts (v2.3.7) were re-issued only because the https handler ate POST
 // bodies and followed redirects; Chromium handles them natively again.
+// v2.5.6: debugger Fetch stamping of /document/ PDFs is off (viewer failed to
+// load the file). Those PDFs load natively; blob print stamping still runs.
 function installShopDocumentInterceptor(ses, name) {
     try {
         installDocumentInterceptor(ses, name, { stamp: networkStamp, log: pdfLog });

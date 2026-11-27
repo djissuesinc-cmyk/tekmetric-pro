@@ -86,12 +86,15 @@ BUG REPORTS (v2.5.4)
   settings.json, users.json, .env, API keys, cookies, or passwords. A mailto window
   opens to shawn@craigsleaside.com; attach the zip before you send it.
 
-  v2.5.5: the app no longer hooks all https traffic to stamp print PDFs. Only
-  shop.tekmetric.com /document/ responses are intercepted (after Chromium has
-  already sent the request). ProDemand, PartsTech, canned jobs, and other pages
-  use the normal browser network path, including third-party iframe cookies.
-  Failed requests (status 400 or higher, or a network error) are still written
-  to the PDF log as host + path only.
+  v2.5.5: the app no longer hooks all https traffic. ProDemand, PartsTech,
+  canned jobs, and other pages use the normal browser network path, including
+  third-party iframe cookies. Failed requests (status 400 or higher, or a
+  network error) are still written to the PDF log as host + path only.
+
+  v2.5.6: the 2.5.5 debugger Fetch stamp on /document/ PDFs made the built-in
+  viewer fail to load the file on every PC. That stamp hook is off. Print PDFs
+  from /document/ load natively (without the logo stamp on that path). Blob
+  print stamping still runs.
 
 TESTS (developer)
   node test/unit-ai.js
@@ -100,7 +103,7 @@ TESTS (developer)
   node test/unit-about.js
   node test/unit-spooler.js
   node test/unit-settings.js
-  xvfb-run -a npx electron test/e2e-ai.js | e2e-ai-menu.js | e2e-printer.js | e2e-inject.js | e2e-about.js | e2e-admin.js | e2e-intercept-headers.js | e2e-net.js | e2e-popup.js
+  xvfb-run -a npx electron test/e2e-ai.js | e2e-ai-menu.js | e2e-printer.js | e2e-inject.js | e2e-about.js | e2e-admin.js | e2e-intercept-headers.js | e2e-net.js | e2e-popup.js | e2e-doc-viewer.js
   node test/unit-phrases.js
   node test/unit-inspection.js
   node test/unit-intercept.js

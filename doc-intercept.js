@@ -2,10 +2,13 @@
 // v2.5.5: do not register session.protocol.handle('https'). That hook is scheme-wide
 // (Electron cannot scope it by host) and a main-process ses.fetch / net.request
 // passthrough has no top-level-site or initiator context, so Partitioned / CHIPS
-// and some CORS modes do not match the renderer. Only /document/ PDFs are
-// intercepted, via the webContents debugger Fetch domain after Chromium has
-// already sent the request with native cookies. Punchouts and shop/ProDemand
+// and some CORS modes do not match the renderer. Punchouts and shop/ProDemand
 // XHR go through Chromium untouched.
+// v2.5.6: the debugger Fetch stamp on /document/ PDFs (v2.5.5) made Chromium's PDF
+// viewer show "Failed to load PDF document" on every shop PC, even when fulfill
+// returned 200. Production therefore does not attach Fetch. /document/ PDFs load
+// natively (unstamped). Blob/print stamping is unchanged. Pass stampViaFetch:true
+// only in tests that specifically exercise the old hook.
 // Tekmetric opens https://shop.tekmetric.com/document/shop/<id>/repair-order/<key>/<invoice|estimate|work-order|...>
 const DOC_RE = /^https:\/\/shop\.tekmetric\.com\/document\//i;
 const TEK_DOC_RE = /^https:\/\/([a-z0-9-]+\.)*tekmetric\.com\/document\//i;
@@ -200,6 +203,13 @@ function installDocumentInterceptor(ses, name, deps) {
     const attached = new WeakMap(); // WebContents -> Promise
 
     installFailedRequestLogging(ses, log);
+
+    // v2.5.6: off by default. Fetch.fulfillRequest of a stamped (or even unchanged)
+    // PDF is what broke the built-in viewer in 2.5.5.
+    if (!(deps && deps.stampViaFetch)) {
+        log('network interceptor installed on ' + (name || 'session') + ' (document Fetch stamp off; PDFs load natively)');
+        return { attach: async () => {}, lastDoc: lastDocRef() };
+    }
 
     async function attach(wc) {
         if (!wc || wc.isDestroyed && wc.isDestroyed()) return;

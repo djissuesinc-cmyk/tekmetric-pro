@@ -1,5 +1,4 @@
-// Electron e2e (v2.5.5): document PDF stamping via installDocumentInterceptor
-// (debugger Fetch on /document/ only; no session.protocol.handle('https')).
+// Electron e2e (v2.5.6): /document/ PDFs load natively (Fetch stamp off).
 // A local HTTPS server stands in for shop.tekmetric.com /document/ URLs.
 const { app, BrowserWindow, session } = require('electron');
 const https = require('https');
@@ -10,6 +9,8 @@ const { execFileSync } = require('child_process');
 const { installDocumentInterceptor } = require('../doc-intercept');
 
 const pdf = fs.readFileSync('/workspace/realpdf/workorder.pdf');
+const logs = [];
+setTimeout(() => { console.log('E2E_RESULT TIMEOUT'); console.log(logs.join('\n')); app.exit(1); }, 20000);
 
 app.whenReady().then(async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tekpro-net-'));
@@ -38,30 +39,26 @@ app.whenReady().then(async () => {
 
     const ses = session.fromPartition('persist:e2e');
     ses.setCertificateVerifyProc((request, cb) => cb(0));
-    const logs = [];
-    setTimeout(() => { console.log('E2E_RESULT TIMEOUT'); console.log(logs.join('\n')); app.exit(1); }, 20000);
-    const hook = installDocumentInterceptor(ses, 'e2e-net', {
-        stamp: async (b) => Buffer.concat([b, Buffer.from('\n%STAMPED\n')]),
-        log: m => logs.push(m),
-        patterns: [{ urlPattern: '*', requestStage: 'Response' }],
-        shouldIntercept: (u) => /\/document\//.test(u)
-    });
+    installDocumentInterceptor(ses, 'e2e-net', { stamp: async () => { throw new Error('stamp should not run'); }, log: m => logs.push(m) });
 
     const w = new BrowserWindow({ show: false, webPreferences: { partition: 'persist:e2e' } });
-    await hook.attach(w.webContents);
-    let normal = 'skip';
-    try { await w.loadURL(origin + '/page'); normal = await w.webContents.executeJavaScript('document.body.innerText'); } catch (e) { normal = 'offline:' + e.message; }
+    await w.loadURL(origin + '/page');
+    const normal = await w.webContents.executeJavaScript('document.body.innerText');
 
-    const r = await w.webContents.executeJavaScript(`fetch(${JSON.stringify(docUrl)}).then(r=>r.arrayBuffer()).then(b=>{const t=new TextDecoder().decode(new Uint8Array(b).slice(-12));return t})`);
+    const r = await w.webContents.executeJavaScript(`fetch(${JSON.stringify(docUrl)}).then(r=>r.arrayBuffer()).then(b=>{const u=new Uint8Array(b); let s=''; for (let i=0;i<4;i++) s+=String.fromCharCode(u[i]); return s+':' + u.length; })`);
+
     await w.loadURL(docUrl).catch(e => logs.push('nav ' + e.message));
     const navUrl = w.webContents.getURL();
+    const info = await w.webContents.executeJavaScript(`({ ct: document.contentType, text: (document.body && document.body.innerText) || '', ready: document.readyState })`).catch(e => ({ err: String(e) }));
+    const viewerOk = info && info.ct === 'application/pdf' && !/failed to load pdf document/i.test(info.text || '');
 
     console.log('normal page:', JSON.stringify(normal));
-    console.log('tail:', JSON.stringify(r));
+    console.log('fetch magic:', JSON.stringify(r));
     console.log('nav url:', navUrl);
+    console.log('viewer:', info);
     console.log(logs.join('\n'));
     server.close();
-    const ok = r.includes('STAMPED') && /\/document\//.test(navUrl);
+    const ok = r.startsWith('%PDF') && /\/document\//.test(navUrl) && viewerOk && logs.some(l => /Fetch stamp off/i.test(l));
     console.log(ok ? 'E2E OK' : 'E2E FAIL');
     app.exit(ok ? 0 : 1);
 }).catch(e => { console.error(e); app.exit(1); });
