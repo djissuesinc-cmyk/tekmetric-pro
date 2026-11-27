@@ -37,5 +37,16 @@ const stamp = async (buf, info) => { const h = await findHeader(buf); const k = 
   const h4 = makeHttpsHandler({ fetch: async () => new Response(pdf, { headers: { 'content-type': 'application/octet-stream' } }), stamp, log });
   const o4 = Buffer.from(await (await h4(new Request('https://api.tekmetric.com/x/pdf'))).arrayBuffer());
   assert.notDeepEqual(o4, pdf);
+  const { isDocumentUrl, shouldPauseForStamp, lastDocRef } = require('../doc-intercept');
+  assert.equal(isDocumentUrl('https://shop.tekmetric.com/document/shop/1/repair-order/x/invoice'), true);
+  assert.equal(isDocumentUrl('https://www.tekmetric.com/document/shop/1/x/invoice'), true);
+  assert.equal(isDocumentUrl('https://shop.tekmetric.com/api/tekmotor/v2/1/search'), false);
+  assert.equal(isDocumentUrl('https://www1.prodemand.com/api/vehicles/m1VehicleId'), false);
+  assert.equal(shouldPauseForStamp('https://shop.tekmetric.com/document/shop/1/x/invoice', [], lastDocRef()), true);
+  assert.equal(shouldPauseForStamp('https://www1.prodemand.com/api/vehicles/m1VehicleId', [{ name: 'content-type', value: 'application/json' }], lastDocRef()), false);
+  const ld = lastDocRef();
+  ld.kind = 'inspection'; ld.t = Date.now();
+  assert.equal(shouldPauseForStamp('https://api.tekmetric.com/x/pdf', [{ name: 'content-type', value: 'application/pdf' }], ld), true);
+  assert.equal(shouldPauseForStamp('https://api.tekmetric.com/x/pdf', [{ name: 'content-type', value: 'application/json' }], ld), false);
   console.log(logs.join('\n')); console.log('UNIT OK');
 })().catch(e => { console.error(e); process.exit(1); });

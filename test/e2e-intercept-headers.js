@@ -1,14 +1,16 @@
-// Electron e2e (v2.5.4): interceptor forwards Cookie, Origin and POST body through
-// the real session.protocol.handle('https') + makeSessionFetch path.
+// Electron e2e (v2.5.5): after dropping the session-wide https protocol.handle,
+// Chromium handles shop and third-party traffic natively. The document interceptor
+// is still installed (as in the app) and must not break cookies or custom headers.
+// - same-origin GET with a cookie plus a custom header
+// - cross-site iframe sets SameSite=None; Partitioned and reads it back via fetch
 // Run: xvfb-run -a npx electron test/e2e-intercept-headers.js
-const { app, BrowserWindow, session, net } = require('electron');
+const { app, BrowserWindow, session } = require('electron');
 const https = require('https');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { makeHttpsHandler } = require('../doc-intercept');
-const { makeSessionFetch } = require('../nav-fetch');
+const { installDocumentInterceptor } = require('../doc-intercept');
 
 app.whenReady().then(async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tekpro-hdr-'));
@@ -28,35 +30,64 @@ app.whenReady().then(async () => {
                 cookie: req.headers.cookie || '',
                 origin: req.headers.origin || '',
                 referer: req.headers.referer || '',
-                acrm: req.headers['access-control-request-method'] || '',
+                csrf: req.headers['x-csrf-token'] || '',
+                custom: req.headers['x-tekpro-test'] || '',
                 body: Buffer.concat(chunks).toString()
             };
             seen.push(rec);
-            if (req.url === '/set') {
-                res.writeHead(200, { 'set-cookie': 'tp=1; Path=/; SameSite=None; Secure', 'content-type': 'text/plain' });
-                res.end('set');
-                return;
-            }
+            const cors = {
+                'access-control-allow-origin': req.headers.origin || '*',
+                'access-control-allow-credentials': 'true',
+                'access-control-allow-headers': 'content-type, x-tekpro-test, x-csrf-token',
+                'access-control-allow-methods': 'GET, POST, OPTIONS'
+            };
             if (req.method === 'OPTIONS') {
-                res.writeHead(204, {
-                    'access-control-allow-origin': req.headers.origin || '*',
-                    'access-control-allow-credentials': 'true',
-                    'access-control-allow-headers': 'content-type, x-tekpro-test',
-                    'access-control-allow-methods': 'POST, OPTIONS'
-                });
+                res.writeHead(204, cors);
                 res.end();
                 return;
             }
-            if (req.url === '/' || req.url === '/page') {
-                res.writeHead(200, { 'content-type': 'text/html' });
-                res.end('<html><body>ok</body></html>');
+            if (req.url === '/set') {
+                res.writeHead(200, { 'set-cookie': 'tp=1; Path=/; SameSite=Lax; Secure', 'content-type': 'text/plain' });
+                res.end('set');
                 return;
             }
-            res.writeHead(200, {
-                'content-type': 'application/json',
-                'access-control-allow-origin': req.headers.origin || '*',
-                'access-control-allow-credentials': 'true'
-            });
+            if (req.url === '/page' || req.url === '/') {
+                res.writeHead(200, { 'content-type': 'text/html' });
+                res.end('<html><body>shop</body></html>');
+                return;
+            }
+            if (req.url === '/shop-frame') {
+                res.writeHead(200, { 'content-type': 'text/html' });
+                res.end('<html><body><iframe id="pd" src="https://localhost:' + port + '/pick"></iframe></body></html>');
+                return;
+            }
+            if (req.url === '/pick') {
+                res.writeHead(200, {
+                    'content-type': 'text/html',
+                    'set-cookie': 'pd=1; Path=/; SameSite=None; Secure; Partitioned'
+                });
+                res.end(`<html><body><script>
+fetch('/api/vehicles/m1VehicleId', { credentials: 'include' })
+  .then(r => r.text().then(t => document.body.setAttribute('data-pd', r.status + ':' + t)))
+  .catch(e => document.body.setAttribute('data-pd', 'err:' + e));
+</script></body></html>`);
+                return;
+            }
+            if (req.url === '/api/vehicles/m1VehicleId') {
+                const ok = /(?:^|;\s*)pd=1(?:;|$)/.test(req.headers.cookie || '');
+                res.writeHead(ok ? 200 : 401, Object.assign({ 'content-type': 'application/json' }, cors));
+                res.end(JSON.stringify({ ok, cookie: req.headers.cookie || '' }));
+                return;
+            }
+            if (req.url === '/api/tekmotor/search') {
+                const cookieOk = /(?:^|;\s*)tp=1(?:;|$)/.test(req.headers.cookie || '');
+                const headerOk = req.headers['x-csrf-token'] === 'tok-1' && req.headers['x-tekpro-test'] === '1';
+                const ok = cookieOk && headerOk;
+                res.writeHead(ok ? 200 : 403, Object.assign({ 'content-type': 'application/json' }, cors));
+                res.end(JSON.stringify({ ok, cookieOk, headerOk, cookie: req.headers.cookie || '' }));
+                return;
+            }
+            res.writeHead(200, Object.assign({ 'content-type': 'application/json' }, cors));
             res.end(JSON.stringify(rec));
         });
     });
@@ -66,51 +97,68 @@ app.whenReady().then(async () => {
     const ses = session.fromPartition('persist:e2ehdr');
     ses.setCertificateVerifyProc((request, cb) => cb(0));
     const logs = [];
-    ses.protocol.handle('https', makeHttpsHandler({
-        fetch: makeSessionFetch(net, ses, m => logs.push(m)),
-        stamp: async () => null,
-        log: m => logs.push(m)
-    }));
+    installDocumentInterceptor(ses, 'e2ehdr', { stamp: async () => null, log: m => logs.push(m) });
 
     const w = new BrowserWindow({ show: false, webPreferences: { partition: 'persist:e2ehdr', webSecurity: true } });
     await w.loadURL(origin + '/page');
+
     await w.webContents.executeJavaScript(`fetch(${JSON.stringify(origin + '/set')}, { credentials: 'include' }).then(r => r.text())`);
-
-    const post = await w.webContents.executeJavaScript(`fetch(${JSON.stringify(origin + '/echo')}, {
-        method: 'POST',
+    const sameOrigin = await w.webContents.executeJavaScript(`fetch(${JSON.stringify(origin + '/api/tekmotor/search')}, {
         credentials: 'include',
-        headers: { 'content-type': 'application/json' },
-        body: '{"job":"partstech"}'
-    }).then(r => r.json())`);
+        headers: { 'X-CSRF-Token': 'tok-1', 'X-Tekpro-Test': '1' }
+    }).then(r => r.json().then(j => Object.assign({ status: r.status }, j))).catch(e => ({ err: String(e) }))`);
 
-    // CORS preflight + credentialed POST from a different origin (localhost vs 127.0.0.1)
-    const cors = await w.webContents.executeJavaScript(`fetch('https://localhost:${port}/cors', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'content-type': 'application/json', 'x-tekpro-test': '1' },
-        body: '{"job":"prodemand"}'
-    }).then(r => r.json()).catch(e => ({ err: String(e) }))`);
+    const sameSeen = seen.filter(s => s.method === 'GET' && s.url === '/api/tekmotor/search').pop();
+    const cookieOk = !!(sameSeen && /tp=1/.test(sameSeen.cookie) && sameOrigin && sameOrigin.ok && sameOrigin.status === 200);
+    const headerOk = !!(sameSeen && sameSeen.csrf === 'tok-1' && sameSeen.custom === '1');
 
-    const postSeen = seen.filter(s => s.method === 'POST' && s.url === '/echo').pop();
-    const optSeen = seen.filter(s => s.method === 'OPTIONS' && s.url === '/cors').pop();
-    const corsPost = seen.filter(s => s.method === 'POST' && s.url === '/cors').pop();
+    await w.loadURL(origin + '/shop-frame');
+    const iframeOk = await w.webContents.executeJavaScript(`new Promise((resolve) => {
+        const start = Date.now();
+        const tick = () => {
+            const f = document.getElementById('pd');
+            try {
+                const v = f && f.contentDocument && f.contentDocument.body && f.contentDocument.body.getAttribute('data-pd');
+                if (v) return resolve(v);
+            } catch (e) {}
+            if (Date.now() - start > 12000) return resolve('timeout');
+            setTimeout(tick, 50);
+        };
+        tick();
+    })`);
+    // iframe document may be cross-origin (localhost vs 127.0.0.1), so parent JS cannot read data-pd.
+    // Fall back to the server record and a direct execute in the child frame.
+    let iframeStatus = iframeOk;
+    if (iframeOk === 'timeout' || iframeOk === '') {
+        try {
+            const frames = w.webContents.mainFrame.framesInSubtree || [];
+            for (const f of frames) {
+                if (f.url && f.url.includes('/pick')) {
+                    iframeStatus = await f.executeJavaScript(`new Promise((resolve) => {
+                        const start = Date.now();
+                        const tick = () => {
+                            const v = document.body.getAttribute('data-pd');
+                            if (v) return resolve(v);
+                            if (Date.now() - start > 8000) return resolve('timeout');
+                            setTimeout(tick, 50);
+                        };
+                        tick();
+                    })`);
+                    break;
+                }
+            }
+        } catch (e) { iframeStatus = 'frame-err:' + e.message; }
+    }
+    const vehSeen = seen.filter(s => s.url === '/api/vehicles/m1VehicleId').pop();
+    const partitionedOk = !!(vehSeen && /pd=1/.test(vehSeen.cookie) && (!iframeStatus || iframeStatus === 'timeout' || /^200:/.test(String(iframeStatus))));
 
-    const cookieOk = !!(postSeen && /tp=1/.test(postSeen.cookie));
-    const bodyOk = !!(postSeen && postSeen.body.includes('partstech'));
-    const corsBodyOk = !!(corsPost && corsPost.body.includes('prodemand')) || (cors && cors.body && String(cors.body).includes('prodemand'));
-    // Origin / preflight: Chromium's protocol.handle may omit Origin. If it is present, it must be forwarded.
-    const originForwarded = !postSeen || !postSeen.origin || postSeen.origin === origin;
-    const preflightOk = !optSeen || (optSeen.origin === origin && /POST/i.test(optSeen.acrm));
-
-    console.log('POST cookie', cookieOk, postSeen && postSeen.cookie);
-    console.log('POST body', bodyOk, postSeen && postSeen.body);
-    console.log('POST origin', postSeen && postSeen.origin, 'forwarded', originForwarded);
-    console.log('OPTIONS preflight', optSeen);
-    console.log('CORS POST', corsBodyOk, corsPost || cors);
+    console.log('same-origin GET cookie', cookieOk, sameSeen && sameSeen.cookie, sameOrigin);
+    console.log('same-origin GET custom headers', headerOk, sameSeen && { csrf: sameSeen.csrf, custom: sameSeen.custom });
+    console.log('iframe partitioned cookie', partitionedOk, vehSeen && vehSeen.cookie, iframeStatus);
     console.log(logs.join('\n'));
 
     server.close();
-    const ok = cookieOk && bodyOk && corsBodyOk && originForwarded && preflightOk;
+    const ok = cookieOk && headerOk && partitionedOk;
     console.log(ok ? 'INTERCEPT-HEADERS E2E OK' : 'INTERCEPT-HEADERS E2E FAIL');
     app.exit(ok ? 0 : 1);
 }).catch(e => { console.error(e); app.exit(1); });

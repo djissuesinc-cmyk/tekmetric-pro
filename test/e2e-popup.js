@@ -1,11 +1,13 @@
-// Electron e2e (v2.3.7): redirects + POST-form punchout popup through the real https handler + session fetch
-const { app, BrowserWindow, session, net } = require('electron');
-const { makeHttpsHandler } = require('../doc-intercept');
-const { makeSessionFetch } = require('../nav-fetch');
+// Electron e2e (v2.5.5): Nexpart/PartsTech punchout works without a session-wide
+// https protocol.handle. v2.3.7 had to re-issue POST bodies and return 3xx to
+// Chromium only because that handler swallowed them. Native navigations keep
+// the POST form and follow the 302 themselves.
+const { app, BrowserWindow, session } = require('electron');
+const { installDocumentInterceptor } = require('../doc-intercept');
 app.whenReady().then(async () => {
   const ses = session.fromPartition('persist:e2epop');
   const logs = [];
-  ses.protocol.handle('https', makeHttpsHandler({ fetch: makeSessionFetch(net, ses, m => logs.push(m)), stamp: async () => null, log: m => logs.push(m) }));
+  installDocumentInterceptor(ses, 'e2epop', { stamp: async () => null, log: m => logs.push(m) });
   const w = new BrowserWindow({ show: false, webPreferences: { partition: 'persist:e2epop' } });
   await w.loadURL('https://httpbin.org/redirect-to?url=https%3A%2F%2Fexample.com%2F').catch(e => logs.push('nav err ' + e.message));
   const redirOk = w.webContents.getURL() === 'https://example.com/';

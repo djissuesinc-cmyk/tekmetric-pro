@@ -14,8 +14,7 @@ const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 const { stampPdf, findHeader, detectKind, stampJob, prewarm: prewarmPdfWorker } = require('./pdf-async'); // v2.3.9: long-lived worker + combined stampJob
 const { brandCss, brandHeader, signboardCss, signboardHeader } = require('./brand');
 const { settingsEditorHtml } = require('./settings-html');
-const { makeSessionFetch } = require('./nav-fetch');
-const { makeHttpsHandler, kindFromUrl, DOC_RE } = require('./doc-intercept');
+const { kindFromUrl, DOC_RE, installDocumentInterceptor } = require('./doc-intercept');
 const os = require('os');
 // Bulletproof startup marker: written synchronously on 'ready' to every candidate folder
 app.on('ready', () => {
@@ -1623,15 +1622,14 @@ async function networkStamp(buf, info) {
     return Buffer.from(r.bytes);
 }
 
-function installDocumentInterceptor(ses, name) {
+// v2.5.5: no session.protocol.handle('https'). That is scheme-wide and cannot be
+// limited to /document/ URLs; a main-process passthrough also drops Partitioned
+// iframe cookies (ProDemand 401) and can break CORS (fonts.gstatic ERR_FAILED).
+// Punchouts (v2.3.7) were re-issued only because the https handler ate POST
+// bodies and followed redirects; Chromium handles them natively again.
+function installShopDocumentInterceptor(ses, name) {
     try {
-        const handler = makeHttpsHandler({
-            fetch: makeSessionFetch(net, ses, pdfLog), // v2.3.7: keeps POST bodies + real redirects (parts punchouts)
-            stamp: networkStamp,
-            log: pdfLog
-        });
-        ses.protocol.handle('https', handler);
-        pdfLog('network interceptor installed on ' + name);
+        installDocumentInterceptor(ses, name, { stamp: networkStamp, log: pdfLog });
     } catch (e) { pdfLog('network interceptor FAILED on ' + name + ': ' + (e && e.stack || e)); }
 }
 
@@ -1842,8 +1840,8 @@ app.whenReady().then(() => {
     app.userAgentFallback = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
     
     purgeTempFiles();
-    installDocumentInterceptor(session.fromPartition('persist:tekmetric_session'), 'persist:tekmetric_session');
-    installDocumentInterceptor(session.defaultSession, 'default');
+    installShopDocumentInterceptor(session.fromPartition('persist:tekmetric_session'), 'persist:tekmetric_session');
+    installShopDocumentInterceptor(session.defaultSession, 'default');
     app.setAppUserModelId("com.craigsleaside.tekmetricpro");
     session.defaultSession.setSpellCheckerLanguages(['en-CA', 'en-US']);
 
