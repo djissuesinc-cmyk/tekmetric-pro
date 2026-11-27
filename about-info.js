@@ -1,5 +1,6 @@
 // v2.5.2: About window HTML. Version is passed in (app.getVersion()), never hardcoded.
 // v2.5.3: signboard header, colours, and panels. Callers pass css + header from brand.js.
+// v2.5.4: experimental-software notice, mailto, and Create Bug Report button.
 function escapeHtml(str) {
     return String(str == null ? '' : str)
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -63,6 +64,15 @@ function aboutHtml(version, opts) {
                     <p style="font-size:12px;color:#E30613;margin:8px 0 4px;letter-spacing:1px;">Parts &middot; Service &middot; Tires</p>
                     <p class="sb-muted" style="font-size:11px;margin:0;line-height:1.6;">416-421-3030 &middot; info@craigsleaside.com<br>craigsleaside.com</p>
                 </div>
+                <div id="about-experimental" class="sb-panel" style="margin-top:14px;">
+                    <h2 style="margin:0 0 8px 0;font-size:14px;color:#E30613;">Experimental software</h2>
+                    <p class="sb-secondary" style="margin:0 0 12px 0;font-size:13px;line-height:1.55;">
+                        Tekmetric Pro is experimental and may contain bugs. If you find an issue, please write down what happened (what you clicked, the RO number and a screenshot if you can) and send a bug report to
+                        <a id="about-bug-email" href="mailto:shawn@craigsleaside.com">shawn@craigsleaside.com</a>
+                        for review.
+                    </p>
+                    <button id="about-bug-report" type="button">Create Bug Report</button>
+                </div>
             </div>
             <div class="sb-footer">
                 <strong style="color:#c9cdd4;">LEGAL DISCLAIMER:</strong> This software operates as a standalone container alongside Tekmetric. It does not reflect the views or official software of Tekmetric. Unauthorized distribution or deployment outside of the authorized facility is prohibited.
@@ -70,6 +80,13 @@ function aboutHtml(version, opts) {
             <div class="sb-actions">
                 <button id="about-ack" onclick="window.close()">Acknowledged</button>
             </div>
+            <script>
+                const btn = document.getElementById('about-bug-report');
+                if (btn) btn.addEventListener('click', function (e) {
+                    e.preventDefault();
+                    if (window.tekproAbout && window.tekproAbout.openBugReport) window.tekproAbout.openBugReport();
+                });
+            </script>
         </body>`;
 }
 

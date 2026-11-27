@@ -1,4 +1,4 @@
-// v2.5.3: open the About window, check version + program section + signboard branding, save a screenshot.
+// v2.5.4: open the About window, check version, program section, experimental notice, bug-report button, save a screenshot.
 // Run: xvfb-run -a npx electron test/e2e-about.js
 const { app, BrowserWindow } = require('electron');
 const { aboutHtml } = require('../about-info');
@@ -33,7 +33,12 @@ app.whenReady().then(async () => {
       logoOk: (() => { const i = document.getElementById('signboard-logo'); return !!(i && i.complete && i.naturalWidth > 0 && String(i.src).indexOf('data:image') === 0); })(),
       fonts: document.fonts.check('700 20px Oswald') && document.fonts.check('400 16px Inter') && document.fonts.check('600 16px Inter'),
       leasideColor: (() => { const s = document.querySelector('#signboard-header .sb-name span'); return s && getComputedStyle(s).color; })(),
-      headerBorder: (() => { const h = document.getElementById('signboard-header'); return h && getComputedStyle(h).borderBottomColor; })()
+      headerBorder: (() => { const h = document.getElementById('signboard-header'); return h && getComputedStyle(h).borderBottomColor; })(),
+      experimental: document.getElementById('about-experimental') && document.getElementById('about-experimental').innerText,
+      emailHref: document.getElementById('about-bug-email') && document.getElementById('about-bug-email').getAttribute('href'),
+      emailText: document.getElementById('about-bug-email') && document.getElementById('about-bug-email').textContent.trim(),
+      bugBtn: document.getElementById('about-bug-report') && document.getElementById('about-bug-report').textContent.trim(),
+      noticeBorder: (() => { const n = document.getElementById('about-experimental'); return n && getComputedStyle(n).borderLeftColor; })()
     })`);
     if (info.heading !== 'Tekmetric Pro' && !/Tekmetric Pro/i.test(info.heading || '')) return fail('heading: ' + info.heading);
     if (info.version !== 'Version ' + version) return fail('version render: ' + JSON.stringify(info.version) + ' expected Version ' + version);
@@ -48,7 +53,13 @@ app.whenReady().then(async () => {
     }
     if (!info.logoOk) return fail('signboard logo did not load');
     if (!info.fonts) return fail('Oswald/Inter did not load: ' + JSON.stringify(info.fonts));
-    const shotDir = '/workspace/out29';
+    if (!info.experimental || !/experimental and may contain bugs/i.test(info.experimental) || !/shawn@craigsleaside.com/.test(info.experimental)) {
+      return fail('experimental notice: ' + JSON.stringify(info.experimental));
+    }
+    if (info.emailHref !== 'mailto:shawn@craigsleaside.com') return fail('email href: ' + info.emailHref);
+    if (info.emailText !== 'shawn@craigsleaside.com') return fail('email text: ' + info.emailText);
+    if (info.bugBtn !== 'Create Bug Report') return fail('bug report button: ' + info.bugBtn);
+    const shotDir = '/workspace/out30';
     fs.mkdirSync(shotDir, { recursive: true });
     const png = await win.capturePage();
     fs.writeFileSync(path.join(shotDir, 'about.png'), png.toPNG());

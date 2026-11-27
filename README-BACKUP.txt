@@ -79,6 +79,18 @@ RESET PRINT SPOOLER (v2.5.2)
   asks Windows for admin permission, stops the spooler, clears stuck jobs, and starts it
   again. The result is written to the PDF log.
 
+BUG REPORTS (v2.5.4)
+  Help > About System has an experimental-software notice and a Create Bug Report
+  button. The report is a zip in Downloads with a redacted log excerpt for the time
+  you pick, a short info file, and any crash dumps from that window. It never includes
+  settings.json, users.json, .env, API keys, cookies, or passwords. A mailto window
+  opens to shawn@craigsleaside.com; attach the zip before you send it.
+
+  The https interceptor (used to stamp print PDFs) now passes other traffic through
+  with cookies, Origin, and POST bodies intact, so ProDemand labor guides and
+  PartsTech parts lookup are not broken by the stamp hook. Failed requests (status
+  400 or higher, or a network error) are written to the PDF log as host + path only.
+
 TESTS (developer)
   node test/unit-ai.js
   node test/unit-printer.js
@@ -86,7 +98,9 @@ TESTS (developer)
   node test/unit-about.js
   node test/unit-spooler.js
   node test/unit-settings.js
-  xvfb-run -a npx electron test/e2e-ai.js | e2e-ai-menu.js | e2e-printer.js | e2e-inject.js | e2e-about.js | e2e-admin.js
+  xvfb-run -a npx electron test/e2e-ai.js | e2e-ai-menu.js | e2e-printer.js | e2e-inject.js | e2e-about.js | e2e-admin.js | e2e-intercept-headers.js
   node test/unit-phrases.js
   node test/unit-inspection.js
   node test/unit-intercept.js
+  node test/unit-nav-fetch.js
+  node test/unit-bug-report.js

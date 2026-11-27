@@ -1,9 +1,10 @@
-const { app, BrowserWindow, Menu, dialog, ipcMain, protocol, net, session } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, protocol, net, session, shell } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { createAiClient } = require('./ai-request');
 const { captureSrc, applySrc } = require('./ai-insert');
 const { resolvePrinter, printerMenuModel } = require('./printer-pick');
 const { aboutHtml } = require('./about-info');
+const { bugReportDialogHtml, defaultBugReportRange, createBugReport } = require('./bug-report');
 const { resetPrintSpooler } = require('./spooler-reset');
 const { spawn } = require('child_process');
 const path = require('path');
@@ -1207,6 +1208,23 @@ function openPresetsEditor() {
     win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
 }
 
+function openMailtoExternal(raw) {
+    if (!raw || !/^mailto:/i.test(String(raw))) return false;
+    shell.openExternal(String(raw)).catch((e) => { try { pdfLog('mailto open failed: ' + (e && e.message)); } catch (err) {} });
+    return true;
+}
+
+function attachMailtoHandlers(win) {
+    if (!win || win.isDestroyed()) return;
+    win.webContents.setWindowOpenHandler(({ url }) => {
+        openMailtoExternal(url);
+        return { action: 'deny' };
+    });
+    win.webContents.on('will-navigate', (e, u) => {
+        if (openMailtoExternal(u)) e.preventDefault();
+    });
+}
+
 function openAboutWindow() {
     const parentWin = getMainWin();
     const aboutWin = new BrowserWindow({
@@ -1216,12 +1234,100 @@ function openAboutWindow() {
         alwaysOnTop: true,
         title: 'About System', icon: path.join(__dirname, 'logo.png'),
         autoHideMenuBar: true, resizable: false, backgroundColor: '#0d0e11',
-        webPreferences: { nodeIntegration: false, contextIsolation: true }
+        webPreferences: {
+            preload: path.join(__dirname, 'about-preload.js'),
+            nodeIntegration: false,
+            contextIsolation: true
+        }
     });
 
     const htmlContent = aboutHtml(app.getVersion(), { css: signboardCss(), header: signboardHeader() });
     aboutWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(htmlContent));
+    attachMailtoHandlers(aboutWin);
 }
+
+let bugReportWin = null;
+
+function openBugReportWindow() {
+    if (bugReportWin && !bugReportWin.isDestroyed()) {
+        bugReportWin.focus();
+        return;
+    }
+    const parentWin = getMainWin();
+    const defaults = defaultBugReportRange(new Date(), 'America/Toronto');
+    bugReportWin = new BrowserWindow({
+        width: 460, height: 520,
+        parent: parentWin || undefined,
+        modal: !!parentWin,
+        alwaysOnTop: true,
+        title: 'Create Bug Report', icon: path.join(__dirname, 'logo.png'),
+        autoHideMenuBar: true, resizable: false, backgroundColor: '#0d0e11',
+        webPreferences: {
+            preload: path.join(__dirname, 'bug-report-preload.js'),
+            nodeIntegration: false,
+            contextIsolation: true
+        }
+    });
+    const html = bugReportDialogHtml(defaults, signboardCss());
+    bugReportWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    bugReportWin.on('closed', () => { bugReportWin = null; });
+}
+
+function osVersionLabel() {
+    try {
+        if (typeof os.version === 'function') return os.type() + ' ' + os.version() + ' (' + os.release() + ')';
+    } catch (e) {}
+    return os.type() + ' ' + os.release();
+}
+
+ipcMain.on('about-open-bug-report', () => { openBugReportWindow(); });
+ipcMain.on('bug-report-cancel', (event) => {
+    const w = BrowserWindow.fromWebContents(event.sender);
+    if (w && !w.isDestroyed()) w.close();
+});
+ipcMain.handle('bug-report-create', async (event, payload) => {
+    const parent = getMainWin();
+    try {
+        const s = loadSettings();
+        const printerName = (s && typeof s.printerName === 'string') ? s.printerName : '';
+        let crashDir = '';
+        try { crashDir = app.getPath('crashDumps'); } catch (e) { crashDir = ''; }
+        const result = createBugReport({
+            fs,
+            date: payload && payload.date,
+            fromTime: payload && payload.fromTime,
+            toTime: payload && payload.toTime,
+            note: payload && payload.note,
+            logPaths: [pdfLogPath(), path.join(app.getPath('userData'), 'pdf-stamp.log.old')],
+            crashDir,
+            downloadsDir: app.getPath('downloads'),
+            version: app.getVersion(),
+            electronVersion: process.versions.electron,
+            chromeVersion: process.versions.chrome,
+            osVersion: osVersionLabel(),
+            pcName: os.hostname(),
+            printerName,
+            now: new Date(),
+            tz: 'America/Toronto'
+        });
+        if (!result.ok) return result;
+        try { shell.showItemInFolder(result.path); } catch (e) { pdfLog('showItemInFolder failed: ' + (e && e.message)); }
+        if (result.mailto) {
+            try { await shell.openExternal(result.mailto); } catch (e) { pdfLog('bug report mailto failed: ' + (e && e.message)); }
+        }
+        const msg = 'The file ' + result.zipName + ' was saved in your Downloads folder.\n\nA new email to shawn@craigsleaside.com is open in your mail app. Please attach that zip file before you send it.';
+        const box = { type: 'info', title: 'Bug report saved', message: msg };
+        if (parent && isAlive(parent)) await dialog.showMessageBox(parent, box);
+        else await dialog.showMessageBox(box);
+        const w = BrowserWindow.fromWebContents(event.sender);
+        if (w && !w.isDestroyed()) w.close();
+        return result;
+    } catch (e) {
+        const message = 'Could not create the bug report. ' + (e && e.message ? e.message : String(e));
+        try { pdfLog('bug report error: ' + message); } catch (err) {}
+        return { ok: false, message };
+    }
+});
 
 const SPOOLER_CONFIRM = 'This clears all stuck print jobs on this PC and restarts printing. Windows will ask for admin permission.';
 let spoolerResetBusy = false;

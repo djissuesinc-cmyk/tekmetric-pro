@@ -1,4 +1,4 @@
-// v2.5.3: About window HTML + signboard header. Run: node test/unit-about.js
+// v2.5.4: About window HTML + signboard header + experimental notice. Run: node test/unit-about.js
 const assert = require('assert');
 const { aboutHtml } = require('../about-info');
 const { signboardCss, signboardHeader, badgeDataUrl } = require('../brand');
@@ -47,4 +47,13 @@ assert(css.includes('#17181d') && css.includes('linear-gradient(#1b1c22,#121318)
 const escaped = aboutHtml('<2.5.3>', { css: '', header: '' });
 assert(escaped.includes('Version &lt;2.5.3&gt;'), 'version must be escaped');
 assert(!escaped.includes('Version <2.5.3>'), 'raw version brackets leaked');
+
+assert(html.includes('id="about-experimental"'), 'experimental notice missing');
+assert(/Tekmetric Pro is experimental and may contain bugs/.test(html), 'experimental wording missing');
+assert(html.includes('id="about-bug-email"'), 'bug email link missing');
+assert(/href="mailto:shawn@craigsleaside.com"/.test(html), 'mailto href missing');
+assert(html.includes('shawn@craigsleaside.com'), 'email address missing');
+assert(html.includes('id="about-bug-report"'), 'Create Bug Report button missing');
+assert(/>Create Bug Report</.test(html), 'Create Bug Report label missing');
 console.log('ABOUT UNIT OK');
+

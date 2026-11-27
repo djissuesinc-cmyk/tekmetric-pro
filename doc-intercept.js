@@ -18,6 +18,22 @@ function isPdfBytes(buf) {
     return buf && buf.length >= 4 && buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46;
 }
 
+// Host + path only. No query string, hash, or long token-like path segments.
+function urlForLog(u) {
+    try {
+        const x = new URL(u);
+        const path = x.pathname.replace(/\/[^/]+/g, (seg) => {
+            const s = seg.slice(1);
+            // Token-like (long mixed-case / base64). Keep ordinary lowercase path names.
+            if (s.length >= 16 && (/[A-Z]/.test(s) || !/-/.test(s))) return '/…';
+            return seg;
+        });
+        return x.host + path;
+    } catch (e) {
+        return 'invalid-url';
+    }
+}
+
 // deps: { fetch(req) -> Promise<Response>, stamp(buf, {url, kind}) -> Promise<Buffer|null>, log(msg) }
 function makeHttpsHandler(deps) {
     const log = deps.log || (() => {});
@@ -30,7 +46,11 @@ function makeHttpsHandler(deps) {
         const isTek = TEK_HOST_RE.test(u);
         let res;
         try { res = await deps.fetch(req); }
-        catch (e) { if (isDoc) log('doc fetch error ' + u + ': ' + (e && e.message)); throw e; }
+        catch (e) {
+            log('net error ' + req.method + ' ' + urlForLog(u) + ': ' + (e && e.message));
+            throw e;
+        }
+        if (res && res.status >= 400) log('net ' + req.method + ' ' + urlForLog(u) + ' -> ' + res.status);
         if (!isTek) return res;
         const ct = (res.headers.get('content-type') || '').toLowerCase();
         const maybePdf = ct.includes('application/pdf') || ct.includes('octet-stream') || ct.includes('application/x-pdf');
@@ -40,7 +60,7 @@ function makeHttpsHandler(deps) {
         if (!maybePdf && isDoc && !/text\/html|json|text\/plain/.test(ct)) return res;
         let buf;
         try { buf = Buffer.from(await res.arrayBuffer()); }
-        catch (e) { log('read body failed ' + u + ': ' + e.message); return new Response(null, { status: 502 }); }
+        catch (e) { log('read body failed ' + urlForLog(u) + ': ' + e.message); return new Response(null, { status: 502 }); }
         const headers = new Headers(res.headers);
         headers.delete('content-encoding'); // body is already decoded
         let out = buf;
@@ -58,4 +78,4 @@ function makeHttpsHandler(deps) {
     };
 }
 
-module.exports = { makeHttpsHandler, kindFromUrl, isPdfBytes, DOC_RE };
+module.exports = { makeHttpsHandler, kindFromUrl, isPdfBytes, DOC_RE, urlForLog };
